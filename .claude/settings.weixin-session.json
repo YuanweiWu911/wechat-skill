@@ -1,0 +1,23 @@
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+    "ANTHROPIC_MODEL": "",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "",
+    "API_TIMEOUT_MS": "600000",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": ""
+  },
+  "model": "sonnet",
+  "extraKnownMarketplaces": {
+    "cc-weixin": {
+      "source": {
+        "source": "github",
+        "repo": "qufei1993/cc-weixin"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "weixin@cc-weixin": true
+  }
+}
