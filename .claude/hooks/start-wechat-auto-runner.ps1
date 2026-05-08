@@ -7,6 +7,9 @@ $ErrorActionPreference = "Stop"
 [Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$PSDefaultParameterValues['*:Encoding'] = 'utf8'
+$env:NODE_OPTIONS = ""
+$env:BUN_UTF8 = "1"
 
 Set-Location $ProjectRoot
 

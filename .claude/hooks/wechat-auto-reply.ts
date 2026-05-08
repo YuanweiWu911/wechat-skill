@@ -20,6 +20,7 @@ interface InboxEntry {
 interface AutoReplyState {
   processedMessageIds: string[];
   lastStartedAt?: string;
+  deadLetterIds: string[];
   pendingConfirmation?: {
     chatId: string;
     contextToken: string;
@@ -117,17 +118,26 @@ function ensureDir(path: string): void {
 
 function loadState(statePath: string): AutoReplyState {
   if (!existsSync(statePath)) {
-    return { processedMessageIds: [] };
+    return { processedMessageIds: [], deadLetterIds: [] };
   }
   try {
     return JSON.parse(readFileSync(statePath, "utf-8")) as AutoReplyState;
   } catch {
-    return { processedMessageIds: [] };
+    return { processedMessageIds: [], deadLetterIds: [] };
   }
 }
 
 function saveState(statePath: string, state: AutoReplyState): void {
-  writeFileSync(statePath, JSON.stringify(state, null, 2), "utf-8");
+  try {
+    writeFileSync(statePath, JSON.stringify(state, null, 2), "utf-8");
+  } catch (e) {
+    const altPath = statePath.replace(".json", ".backup.json");
+    try {
+      writeFileSync(altPath, JSON.stringify(state, null, 2), "utf-8");
+    } catch {
+      // best effort
+    }
+  }
 }
 
 function savePendingReply(pendingPath: string, reply: PendingReply): void {
@@ -220,8 +230,10 @@ function buildUnifiedPrompt(entry: InboxEntry): string {
     "步骤2 — 分类处理：",
     "- 纯闲聊（打招呼、情感表达、简单问答等）→ 不要使用任何工具，直接输出JSON:",
     '  {"action":"chat","reply":"你的自然回复"}',
-    "- 安全操作（查看文件、列出目录、搜索内容、读取信息等）→ 使用Bash/Read/Write工具执行，完成后输出JSON:",
+    "- 安全操作（查看文件、列出目录用Glob/LS、搜索内容、读取信息等）→ 优先用Glob/LS/Read操作，Bash作为备选，完成后输出JSON:",
     '  {"action":"executed","reply":"执行结果文本"}',
+    "- 查询实时信息（天气、新闻、百科等）→ 优先使用WebSearch工具搜索，必要时用WebFetch读取页面，完成后输出JSON:",
+    '  {"action":"executed","reply":"查询结果文本"}',
     "- 风险操作（删除文件、修改系统、安装软件、执行脚本等）→ 不要执行，输出JSON:",
     '  {"action":"risky","warning":"风险说明","command":"操作简述"}',
     "",
@@ -259,7 +271,7 @@ function callClaude(
     "--permission-mode", "bypassPermissions",
   ];
   if (withTools) {
-    args.push("--tools", "Bash,Read,Write");
+    args.push("--tools", "Bash,Read,Write,WebSearch,WebFetch,Glob,LS");
   }
 
   let stdout: string;
@@ -509,6 +521,12 @@ async function processUnreadMessages(config: AutoReplyConfig): Promise<number> {
     }
 
     const currentState = loadState(config.statePath);
+    const deadLetter = new Set(currentState.deadLetterIds || []);
+    if (deadLetter.has(entry.id)) {
+      logLine(config, `Skipping dead-letter: ${entry.id}`);
+      processed.add(entry.id);
+      continue;
+    }
     const pc = currentState.pendingConfirmation;
 
     // --- BRANCH A: Reply to a pending risky-confirmation ---
@@ -606,12 +624,38 @@ async function processUnreadMessages(config: AutoReplyConfig): Promise<number> {
       replied++;
       continue;
     } else {
-      if (!action.reason.includes("EPERM") && !action.reason.includes("LLM调用异常")) {
-        await wrappedSendText({ to: entry.fromUserId, text: "抱歉，处理你的请求时遇到问题。", contextToken: entry.contextToken || "" });
+      if (!action.reason.includes("EPERM")) {
+        const errMsg = `抱歉，处理失败：${action.reason}`;
+        await wrappedSendText({ to: entry.fromUserId, text: errMsg, contextToken: entry.contextToken || "" });
       }
       logLine(config, `Failed: ${action.reason}`);
+
+      const crashKey = `crash:${entry.id}`;
+      const crashCount = (currentState as any)[crashKey] || 0;
+      if (crashCount >= 3) {
+        logLine(config, `Moving to dead-letter: ${entry.id}`);
+        const newDead = [...(currentState.deadLetterIds || []), entry.id].slice(-200);
+        saveState(config.statePath, {
+          ...currentState,
+          processedMessageIds: Array.from(processed).slice(-1000),
+          deadLetterIds: newDead,
+        });
+        continue;
+      }
+      saveState(config.statePath, {
+        ...currentState,
+        processedMessageIds: Array.from(processed).slice(-1000),
+        [crashKey]: crashCount + 1,
+      } as any);
       processed.add(entry.id);
       safeMarkInboxRead(markInboxRead, [entry.id], config);
+      saveState(config.statePath, {
+        ...loadState(config.statePath),
+        processedMessageIds: Array.from(processed).slice(-1000),
+        lastStartedAt: new Date().toISOString(),
+      });
+      replied++;
+      break;
     }
 
     saveState(config.statePath, {
@@ -621,8 +665,11 @@ async function processUnreadMessages(config: AutoReplyConfig): Promise<number> {
     replied++;
   }
 
+  const finalState = loadState(config.statePath);
   saveState(config.statePath, {
     processedMessageIds: Array.from(processed).slice(-1000),
+    deadLetterIds: finalState.deadLetterIds || [],
+    pendingConfirmation: finalState.pendingConfirmation || undefined,
     lastStartedAt: state.lastStartedAt || new Date().toISOString(),
   });
 

@@ -4,6 +4,7 @@ $ErrorActionPreference = "Stop"
 [Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$PSDefaultParameterValues['*:Encoding'] = 'utf8'
 
 $projectRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 $claudeDir = Join-Path $projectRoot ".claude"
