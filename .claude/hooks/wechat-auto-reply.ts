@@ -53,6 +53,7 @@ interface AutoReplyConfig {
   statePath: string;
   pendingPath: string;
   pollMs: number;
+  parentPid: number;
 }
 
 const FALLBACK_REPLY = "已收到你的消息，我会尽快继续处理。";
@@ -60,10 +61,11 @@ const DEFAULT_POLL_MS = 8000;
 
 let processing = false;
 
-function parseArgs(): { projectRoot: string; once: boolean } {
+function parseArgs(): { projectRoot: string; once: boolean; parentPid: number } {
   const args = process.argv.slice(2);
   let projectRoot = process.cwd();
   let once = false;
+  let parentPid = 0;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -76,12 +78,20 @@ function parseArgs(): { projectRoot: string; once: boolean } {
       i++;
     } else if (arg === "--once") {
       once = true;
+    } else if (arg === "--parent-pid") {
+      const value = args[i + 1];
+      const parsed = value ? Number.parseInt(value, 10) : NaN;
+      if (!Number.isFinite(parsed) || parsed <= 0) {
+        throw new Error("Invalid --parent-pid value");
+      }
+      parentPid = parsed;
+      i++;
     } else {
       throw new Error(`Unknown argument: ${arg}`);
     }
   }
 
-  return { projectRoot, once };
+  return { projectRoot, once, parentPid };
 }
 
 function resolveWeixinStateDir(): string {
@@ -155,6 +165,15 @@ function safeMarkInboxRead(markInboxRead: (ids: string[]) => number, ids: string
 function logLine(config: AutoReplyConfig, message: string): void {
   const line = `[${new Date().toISOString()}] ${message}`;
   console.log(line);
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function loadAccount(stateDir: string): AccountData {
@@ -247,12 +266,14 @@ function buildUnifiedPrompt(entry: InboxEntry): string {
 }
 
 function buildRiskyExecutePrompt(originalText: string, command: string): string {
+  const action = command || originalText;
   return [
-    `用户之前要求："${originalText}"`,
-    `用户已确认执行，操作简述：${command}`,
+    `用户要求："${originalText}"，已获得用户确认，请立即执行。`,
+    `具体操作：${action}`,
     "",
-    "请使用Bash/Read/Write工具执行此操作，完成后直接输出执行结果文本。",
-    "用简体中文，简洁清晰，不要Markdown，不要JSON包装。",
+    "请优先使用Glob/LS/Read/Write/WebSearch/WebFetch工具完成操作，Bash有权限限制尽量不用。",
+    "执行完成后用简体中文简洁输出结果，必须输出合法JSON:",
+    '  {"action":"executed","reply":"执行结果文本"}',
   ].join("\n");
 }
 
@@ -285,7 +306,7 @@ function callClaude(
       timeout: 120000,
       env: {
         ...process.env,
-        ANTHROPIC_MODEL: process.env.ANTHROPIC_MODEL_WATCHER || "deepseek-v4-flash",
+        ANTHROPIC_MODEL: process.env.ANTHROPIC_MODEL_WATCHER || "claude-haiku-4-5-20251001",
       },
     });
     stdout = (result.stdout || "").trim();
@@ -680,7 +701,7 @@ async function processUnreadMessages(config: AutoReplyConfig): Promise<number> {
 }
 
 async function main(): Promise<void> {
-  const { projectRoot, once } = parseArgs();
+  const { projectRoot, once, parentPid } = parseArgs();
   const claudeDir = join(projectRoot, ".claude");
   ensureDir(claudeDir);
 
@@ -689,6 +710,7 @@ async function main(): Promise<void> {
     statePath: join(claudeDir, "wechat-auto-state.json"),
     pendingPath: join(claudeDir, "wechat-auto-pending.jsonl"),
     pollMs: DEFAULT_POLL_MS,
+    parentPid,
   };
 
   const initialState = loadState(config.statePath);
@@ -703,6 +725,11 @@ async function main(): Promise<void> {
   await Bun.sleep(5000); // Cooldown: wait for stale file locks to release
 
   do {
+    if (config.parentPid && !isProcessAlive(config.parentPid)) {
+      logLine(config, `Parent process ${config.parentPid} exited, shutting down watcher`);
+      process.exit(0);
+    }
+
     try {
       await processUnreadMessages(config);
     } catch (e) {

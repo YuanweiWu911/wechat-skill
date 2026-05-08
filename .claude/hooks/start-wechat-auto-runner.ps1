@@ -1,6 +1,8 @@
 param(
   [Parameter(Mandatory = $true)]
-  [string]$ProjectRoot
+  [string]$ProjectRoot,
+  [Parameter(Mandatory = $false)]
+  [int]$ParentPid = 0
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,9 +22,22 @@ $backoff = 2
 $maxBackoff = 120
 
 while ($true) {
+  if ($ParentPid) {
+    $parentAlive = Get-Process -Id $ParentPid -ErrorAction SilentlyContinue
+    if (-not $parentAlive) {
+      $timestamp = Get-Date -Format "yyyy-MM-ddTHH:mm:ss.fffZ"
+      "[$timestamp] Runner: parent process $ParentPid exited, stopping watcher" | Add-Content -Path $logPath -Encoding UTF8
+      exit 0
+    }
+  }
+
   $exitCode = 999
   try {
-    bun run $scriptPath --project-root $ProjectRoot *>> $logPath
+    $bunArgs = @("run", $scriptPath, "--project-root", $ProjectRoot)
+    if ($ParentPid) {
+      $bunArgs += @("--parent-pid", $ParentPid)
+    }
+    & bun $bunArgs *>> $logPath
     $exitCode = $LASTEXITCODE
   } catch {
     $timestamp = Get-Date -Format "yyyy-MM-ddTHH:mm:ss.fffZ"

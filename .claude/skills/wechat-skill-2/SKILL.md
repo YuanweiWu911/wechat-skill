@@ -42,7 +42,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/collect
 如果 Watcher 暂停或需手动审核风险操作：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File wechat-approve.ps1 list
+powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/wechat-approve.ps1" list
 ```
 
 每条包含：`[PENDING]` id, 原始消息, 拟回复文本, Raw 执行输出。
@@ -63,7 +63,7 @@ text: <pending 条目中 replyText 的值，原样发送>
 发送成功后，标记 pending 为已处理：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File wechat-approve.ps1 approve <pending-id>
+powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/wechat-approve.ps1" approve <pending-id>
 ```
 
 ### 第 3 步：展示结果

@@ -6,4 +6,7 @@ figure/
 .claude/wechat-auto.pid
 .claude/wechat-auto-reply.json
 .claude/test-write.txt
-test.txt
+.claude/settings.local.json
+.claude/wechat-auto-state.json
+.claude/wechat-auto.log
+test

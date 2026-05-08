@@ -10,8 +10,7 @@ $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $PSDefaultParameterValues['*:Encoding'] = 'utf8'
 $env:BUN_UTF8 = "1"
 
-$repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..\..")
-$weixinInboxScript = Join-Path $repoRoot "weixin-inbox.ps1"
+$weixinInboxScript = Join-Path $PSScriptRoot "weixin-inbox.ps1"
 
 if (-not (Test-Path $weixinInboxScript)) {
   throw "Missing weixin-inbox.ps1 at $weixinInboxScript"
