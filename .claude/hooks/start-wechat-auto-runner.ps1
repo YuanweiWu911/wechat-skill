@@ -25,7 +25,7 @@ while ($true) {
   if ($ParentPid) {
     $parentAlive = Get-Process -Id $ParentPid -ErrorAction SilentlyContinue
     if (-not $parentAlive) {
-      $timestamp = Get-Date -Format "yyyy-MM-ddTHH:mm:ss.fffZ"
+      $timestamp = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
       "[$timestamp] Runner: parent process $ParentPid exited, stopping watcher" | Add-Content -Path $logPath -Encoding UTF8
       exit 0
     }
@@ -40,15 +40,15 @@ while ($true) {
     & bun $bunArgs *>> $logPath
     $exitCode = $LASTEXITCODE
   } catch {
-    $timestamp = Get-Date -Format "yyyy-MM-ddTHH:mm:ss.fffZ"
+    $timestamp = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
     "[$timestamp] Runner: crash $_" | Add-Content -Path $logPath -Encoding UTF8
   }
 
-  if ($exitCode -eq 0) {
+  if ($exitCode -eq 0 -or $exitCode -eq 1 -or $exitCode -eq 2) {
     break
   }
 
-  $timestamp = Get-Date -Format "yyyy-MM-ddTHH:mm:ss.fffZ"
+  $timestamp = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
   "[$timestamp] Runner: watcher exit $exitCode, restart in ${backoff}s" | Add-Content -Path $logPath -Encoding UTF8
 
   Start-Sleep -Seconds $backoff

@@ -46,7 +46,17 @@
       "Bash(TESSDATA_PREFIX=__TRACKED_VAR__/tesseract/tessdata 'C:/Program Files/Tesseract-OCR/tesseract.exe' C:/Users/len/AppData/Local/Temp/weixin-media/1778123737716.jpg C:/Users/len/AppData/Local/Temp/ocr_output_2 -l chi_sim+eng)",
       "Bash(TESSDATA_PREFIX=__TRACKED_VAR__/tesseract/tessdata 'C:/Program Files/Tesseract-OCR/tesseract.exe' C:/Users/len/AppData/Local/Temp/weixin-media/1778123769653.jpg C:/Users/len/AppData/Local/Temp/ocr_output_3 -l chi_sim+eng)",
       "Bash(TESSDATA_PREFIX=\"$HOME/tesseract/tessdata\" C:/Program Files/Tesseract-OCR/tesseract.exe *)",
-      "Read(//c/Users/len/.claude/channels/weixin/**)"
+      "Read(//c/Users/len/.claude/channels/weixin/**)",
+      "Bash(/c/Users/len/AppData/Local/Programs/Python/Python310/python.exe *)",
+      "Read(//c/Users/len/.claude/**)",
+      "Read(//c/Users/len/.claude/plugins/**)",
+      "Bash(tasklist)",
+      "Bash(tasklist /FI \"IMAGENAME eq soffice.exe\")",
+      "Bash(tasklist /FI \"IMAGENAME eq python.exe\")",
+      "Bash(tasklist /FI \"IMAGENAME eq bun.exe\")",
+      "Bash(git restore *)",
+      "Bash(git commit --amend -m ' *)",
+      "Bash(tasklist /FI \"PID eq $\\(cat 'C:/Users/len/ywwu_workspace/claude_skill_learn/.claude/wechat-auto.pid' 2>/dev/null || echo 0\\)\")"
     ]
   },
   "hooks": {

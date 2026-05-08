@@ -508,7 +508,7 @@ async function processUnreadMessages(config: AutoReplyConfig): Promise<number> {
         await Bun.sleep(2000);
       } else {
         logLine(config, `importWeixinModules failed after 5 retries: ${e instanceof Error ? e.message : String(e)}`);
-        return 0;
+        process.exit(2);
       }
     }
   }
@@ -604,6 +604,14 @@ async function processUnreadMessages(config: AutoReplyConfig): Promise<number> {
 
     // --- BRANCH B: New message → analyze intent → act ---
     logLine(config, `Processing: ${entry.id} text="${entry.text.slice(0, 80)}"`);
+
+    processed.add(entry.id);
+    saveState(config.statePath, {
+      ...currentState,
+      processedMessageIds: Array.from(processed).slice(-1000),
+      [`attempting:${entry.id}`]: new Date().toISOString(),
+    } as any);
+
     let action: ActionResult;
     try {
       action = await handleMessage(entry, wrappedSendText, config);
@@ -619,6 +627,7 @@ async function processUnreadMessages(config: AutoReplyConfig): Promise<number> {
       processed.add(entry.id);
       safeMarkInboxRead(markInboxRead, [entry.id], config);
       saveState(config.statePath, {
+        ...currentState,
         processedMessageIds: Array.from(processed).slice(-1000),
         lastStartedAt: new Date().toISOString(),
       });
@@ -660,6 +669,7 @@ async function processUnreadMessages(config: AutoReplyConfig): Promise<number> {
           ...currentState,
           processedMessageIds: Array.from(processed).slice(-1000),
           deadLetterIds: newDead,
+          lastStartedAt: new Date().toISOString(),
         });
         continue;
       }
@@ -667,23 +677,13 @@ async function processUnreadMessages(config: AutoReplyConfig): Promise<number> {
         ...currentState,
         processedMessageIds: Array.from(processed).slice(-1000),
         [crashKey]: crashCount + 1,
+        lastStartedAt: new Date().toISOString(),
       } as any);
       processed.add(entry.id);
       safeMarkInboxRead(markInboxRead, [entry.id], config);
-      saveState(config.statePath, {
-        ...loadState(config.statePath),
-        processedMessageIds: Array.from(processed).slice(-1000),
-        lastStartedAt: new Date().toISOString(),
-      });
       replied++;
       break;
     }
-
-    saveState(config.statePath, {
-      processedMessageIds: Array.from(processed).slice(-1000),
-      lastStartedAt: state.lastStartedAt || new Date().toISOString(),
-    });
-    replied++;
   }
 
   const finalState = loadState(config.statePath);
@@ -723,6 +723,13 @@ async function main(): Promise<void> {
 
   logLine(config, `Auto-reply watcher started in ${config.projectRoot}`);
   await Bun.sleep(5000); // Cooldown: wait for stale file locks to release
+
+  const claudeCheck = spawnSync("claude", ["--version"], { encoding: "utf-8", timeout: 15000 });
+  if (claudeCheck.status !== 0) {
+    logLine(config, `claude CLI check failed (exit ${claudeCheck.status}), watcher cannot function, exiting`);
+    process.exit(0);
+  }
+  logLine(config, `claude CLI available: ${claudeCheck.stdout.trim().slice(0, 80)}`);
 
   do {
     if (config.parentPid && !isProcessAlive(config.parentPid)) {

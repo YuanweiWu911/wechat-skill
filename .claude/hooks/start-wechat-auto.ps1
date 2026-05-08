@@ -24,6 +24,9 @@ if (-not (Test-Path $claudeDir)) {
 # Force-kill ALL old wechat watcher processes
 Get-CimInstance Win32_Process -Filter "Name='bun.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match 'wechat-auto-reply\.ts' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 
+# Force-kill ALL orphan cc-weixin server processes
+Get-CimInstance Win32_Process -Filter "Name='bun.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match 'cc-weixin\\weixin' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+
 # Clean up stale PID file
 Remove-Item $pidPath -Force -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 3
