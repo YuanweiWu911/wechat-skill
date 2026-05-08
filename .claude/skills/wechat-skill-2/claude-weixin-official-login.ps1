@@ -6,16 +6,12 @@ param(
 $ErrorActionPreference = "Stop"
 
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$altSettingsPath = Join-Path $scriptRoot ".claude\settings.weixin-session.json"
+$projectRoot = Resolve-Path (Join-Path $scriptRoot "..\..\..")
+$altSettingsPath = Join-Path $projectRoot ".claude\settings.weixin-session.json"
 
 if (-not (Test-Path $altSettingsPath)) {
   throw "Missing alternate settings file: $altSettingsPath"
 }
 
-$defaultArgs = @(
-  "--settings", $altSettingsPath,
-  "--dangerously-load-development-channels", "plugin:weixin@cc-weixin"
-)
-
-& claude @defaultArgs @ClaudeArgs
+& claude --settings $altSettingsPath auth login @ClaudeArgs
 exit $LASTEXITCODE

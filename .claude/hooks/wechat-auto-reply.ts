@@ -223,26 +223,32 @@ function buildUnifiedPrompt(entry: InboxEntry): string {
   return [
     `用户从微信发来消息："${entry.text}"`,
     "",
-    "你是用户电脑上的自动助手。请按以下流程处理：",
+    "你是一个消息分类器。只分析意图并输出JSON，不要做任何其他事。",
     "",
-    "步骤1 — 分析消息意图：判断这是纯闲聊，还是需要你执行操作。",
-    "",
-    "步骤2 — 分类处理：",
-    "- 纯闲聊（打招呼、情感表达、简单问答等）→ 不要使用任何工具，直接输出JSON:",
+    "分类规则：",
+    "- 纯闲聊（打招呼、情感表达、简单问答等）→ 输出JSON:",
     '  {"action":"chat","reply":"你的自然回复"}',
-    "- 安全操作（查看文件、列出目录用Glob/LS、搜索内容、读取信息等）→ 优先用Glob/LS/Read操作，Bash作为备选，完成后输出JSON:",
-    '  {"action":"executed","reply":"执行结果文本"}',
-    "- 查询实时信息（天气、新闻、百科等）→ 优先使用WebSearch工具搜索，必要时用WebFetch读取页面，完成后输出JSON:",
-    '  {"action":"executed","reply":"查询结果文本"}',
-    "- 风险操作（删除文件、修改系统、安装软件、执行脚本等）→ 不要执行，输出JSON:",
+    "- 安全操作（查看文件、搜索内容、读取信息、查询实时数据等）→ 输出JSON:",
+    '  {"action":"executed","reply":"简述你准备做什么"}',
+    "- 风险操作（删除文件、修改系统、安装软件、执行脚本等）→ 输出JSON:",
     '  {"action":"risky","warning":"风险说明","command":"操作简述"}',
     "",
     "铁律：",
     "- 只输出一行合法JSON，绝不要任何额外文字",
     "- 闲聊回复要自然亲切，用简体中文",
-    "- 执行结果要包含实际数据，简洁清晰",
     "- 风险判断从严：涉及删、改、装、脚本字眼的都是风险",
-    '- 绝对禁止输出"已完成你的请求"、"好的"这类空话',
+  ].join("\n");
+}
+
+function buildSafeExecutePrompt(originalText: string): string {
+  return [
+    `用户要求："${originalText}"。请使用可用工具完成这个请求。`,
+    "",
+    "可用工具：Glob（文件匹配）、Grep（内容搜索）、Read（读取文件）、Bash（Shell命令）、WebSearch（网络搜索）、WebFetch（读取网页）。",
+    "执行完成后用简体中文简洁总结结果，必须输出合法JSON:",
+    '  {"action":"executed","reply":"执行结果文本"}',
+    "",
+    "铁律：只输出一行合法JSON，绝不要任何额外文字。",
   ].join("\n");
 }
 
@@ -252,9 +258,11 @@ function buildRiskyExecutePrompt(originalText: string, command: string): string 
     `用户要求："${originalText}"，已获得用户确认，请立即执行。`,
     `具体操作：${action}`,
     "",
-    "请优先使用Glob/LS/Read/Write/WebSearch/WebFetch工具完成操作，Bash有权限限制尽量不用。",
+    "可用工具：Glob（文件匹配）、Grep（内容搜索）、Read（读取文件）、Write（写入文件）、Bash（Shell命令）、WebSearch（网络搜索）、WebFetch（读取网页）。",
     "执行完成后用简体中文简洁输出结果，必须输出合法JSON:",
     '  {"action":"executed","reply":"执行结果文本"}',
+    "",
+    "铁律：只输出一行合法JSON，绝不要任何额外文字。",
   ].join("\n");
 }
 
@@ -269,11 +277,10 @@ function callClaude(
 ): { stdout: string; stderr: string; exitCode: number } {
   const args: string[] = [
     "-p", prompt,
-    "--output-format", "json",
     "--permission-mode", "bypassPermissions",
   ];
   if (withTools) {
-    args.push("--tools", "Bash,Read,Write,WebSearch,WebFetch,Glob,LS");
+    args.push("--tools", "Bash,Read,Write,WebSearch,WebFetch,Glob,Grep");
   }
 
   let stdout: string;
@@ -292,13 +299,13 @@ function callClaude(
     });
     stdout = (result.stdout || "").trim();
     stderr = (result.stderr || "").trim();
-    exitCode = result.status ?? 0;
+    exitCode = result.status ?? -1;
 
     if (stdout) {
       logLine(config, `${logLabel}: ${stdout.slice(0, 200)}`);
     }
-    if (result.status !== 0 && stderr) {
-      logLine(config, `${logLabel} stderr: ${stderr.slice(0, 200)}`);
+    if (exitCode !== 0 && stderr) {
+      logLine(config, `${logLabel} stderr (exit=${exitCode}): ${stderr.slice(0, 200)}`);
     }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -309,25 +316,13 @@ function callClaude(
   return { stdout, stderr, exitCode };
 }
 
-function parseActionJson(stdout: string, config: AutoReplyConfig): ActionResult | null {
+function parseActionJson(stdout: string): ActionResult | null {
   const raw = stdout.trim();
   if (!raw) return null;
 
-  // With --tools, claude -p outputs raw text (no JSON envelope).
-  // First, strip a possible claude -p JSON envelope.
-  let inner = raw;
+  // Try to parse the entire output as action JSON
   try {
-    const outer = JSON.parse(raw);
-    if (outer.result && typeof outer.result === "string" && outer.result.trim()) {
-      inner = outer.result.trim();
-    }
-  } catch {
-    // Not wrapped — raw text, use as-is
-  }
-
-  // Try to parse as action JSON directly
-  try {
-    const parsed = JSON.parse(inner);
+    const parsed = JSON.parse(raw);
     if (parsed.action === "chat" && parsed.reply) {
       return { type: "chat", reply: sanitizeReply(parsed.reply) };
     }
@@ -338,11 +333,11 @@ function parseActionJson(stdout: string, config: AutoReplyConfig): ActionResult 
       return { type: "risky", warning: parsed.warning, command: parsed.command || "" };
     }
   } catch {
-    // Not JSON, try regex extraction
+    // Not pure JSON, try to extract a JSON object
   }
 
-  // Try to find a JSON object with "action" field in the output
-  const jsonMatch = inner.match(/\{[\s\S]*?"action"[\s\S]*?\}/);
+  // Try to find a JSON object with "action" field
+  const jsonMatch = raw.match(/\{[\s\S]*?"action"[\s\S]*?\}/);
   if (jsonMatch) {
     try {
       const parsed = JSON.parse(jsonMatch[0]);
@@ -360,10 +355,10 @@ function parseActionJson(stdout: string, config: AutoReplyConfig): ActionResult 
     }
   }
 
-  // Fallback: treat non-JSON output as executed result
-  const cleaned = sanitizeReply(inner);
+  // Fallback: treat non-JSON output as chat reply
+  const cleaned = sanitizeReply(raw);
   if (cleaned) {
-    return { type: "executed", reply: cleaned };
+    return { type: "chat", reply: cleaned };
   }
   return null;
 }
@@ -374,30 +369,100 @@ async function handleMessage(
   config: AutoReplyConfig,
   forceExecute?: { originalText: string; command: string },
 ): Promise<ActionResult> {
-  if (forceExecute) {
+  const isRiskExec = !!forceExecute;
+
+  // --- Risky-execute: user confirmed, execute directly with tools ---
+  if (isRiskExec) {
     const prompt = buildRiskyExecutePrompt(forceExecute.originalText, forceExecute.command);
+    const label = `RiskyExec ${entry.id}`;
     logLine(config, `RiskyExec calling claude for ${entry.id}`);
-    const { stdout } = callClaude(prompt, config.projectRoot, true, `RiskyExec ${entry.id}`, config);
-    const action = parseActionJson(stdout, config);
-    if (action) return action;
-    return { type: "executed", reply: sanitizeReply(stdout) || "执行完成。" };
+
+    let result = callClaude(prompt, config.projectRoot, true, label, config);
+
+    if (!result.stdout.trim() && result.exitCode === 0) {
+      logLine(config, `${label} empty stdout (exit=0), retrying after 2s`);
+      await Bun.sleep(2000);
+      result = callClaude(prompt, config.projectRoot, true, `${label} retry`, config);
+    }
+
+    const action = parseActionJson(result.stdout);
+    if (action) {
+      logLine(config, `RiskyExec parsed: action=${action.type}, reply=${(action as any).reply?.slice(0, 50) || 'N/A'}`);
+      return action;
+    }
+
+    const cleaned = sanitizeReply(result.stdout);
+    if (cleaned) return { type: "executed", reply: cleaned };
+
+    if (result.exitCode !== 0 && result.stderr) {
+      const brief = result.stderr.split("\n").filter(l => l.trim()).slice(0, 2).join(" | ");
+      return { type: "failed", reason: `LLM调用失败(exit=${result.exitCode}): ${brief.slice(0, 100)}` };
+    }
+    return { type: "failed", reason: "无法解析执行结果" };
   }
 
-  const prompt = buildUnifiedPrompt(entry);
-  logLine(config, `Handle calling claude for ${entry.id}`);
-  const { stdout } = callClaude(prompt, config.projectRoot, true, `Handle ${entry.id}`, config);
-  const action = parseActionJson(stdout, config);
-  if (action) {
-    logLine(config, `Handle parsed: action=${action.type}, reply=${(action as any).reply?.slice(0, 50) || 'N/A'}`);
-    return action;
+  // --- Pass 1: classify intent WITHOUT tools ---
+  const classifyPrompt = buildUnifiedPrompt(entry);
+  const classifyLabel = `Classify ${entry.id}`;
+  logLine(config, `Classify calling claude for ${entry.id}`);
+
+  let classifyResult = callClaude(classifyPrompt, config.projectRoot, false, classifyLabel, config);
+
+  if (!classifyResult.stdout.trim() && classifyResult.exitCode === 0) {
+    logLine(config, `${classifyLabel} empty stdout (exit=0), retrying after 2s`);
+    await Bun.sleep(2000);
+    classifyResult = callClaude(classifyPrompt, config.projectRoot, false, `${classifyLabel} retry`, config);
   }
 
-  // Fallback: if JSON parsing failed, try as plain text
-  const cleaned = sanitizeReply(stdout);
-  if (cleaned) {
-    return { type: "chat", reply: cleaned };
+  const action = parseActionJson(classifyResult.stdout);
+
+  if (!action) {
+    if (classifyResult.exitCode !== 0 && classifyResult.stderr) {
+      const brief = classifyResult.stderr.split("\n").filter(l => l.trim()).slice(0, 2).join(" | ");
+      return { type: "failed", reason: `LLM调用失败(exit=${classifyResult.exitCode}): ${brief.slice(0, 100)}` };
+    }
+    return { type: "failed", reason: "无法解析LLM输出" };
   }
-  return { type: "failed", reason: "无法解析LLM输出" };
+
+  logLine(config, `Classify parsed: action=${action.type}, reply=${(action as any).reply?.slice(0, 50) || 'N/A'}`);
+
+  // Chat: reply directly
+  if (action.type === "chat") return action;
+
+  // Risky: return for confirmation flow
+  if (action.type === "risky") return action;
+
+  // --- Pass 2: safe operation — execute WITH tools ---
+  if (action.type === "executed") {
+    const executePrompt = buildSafeExecutePrompt(entry.text);
+    const executeLabel = `Execute ${entry.id}`;
+    logLine(config, `Execute calling claude for ${entry.id}`);
+
+    let execResult = callClaude(executePrompt, config.projectRoot, true, executeLabel, config);
+
+    if (!execResult.stdout.trim() && execResult.exitCode === 0) {
+      logLine(config, `${executeLabel} empty stdout (exit=0), retrying after 2s`);
+      await Bun.sleep(2000);
+      execResult = callClaude(executePrompt, config.projectRoot, true, `${executeLabel} retry`, config);
+    }
+
+    const execAction = parseActionJson(execResult.stdout);
+    if (execAction && (execAction.type === "executed" || execAction.type === "chat")) {
+      logLine(config, `Execute parsed: action=${execAction.type}`);
+      return execAction;
+    }
+
+    const cleaned = sanitizeReply(execResult.stdout);
+    if (cleaned) return { type: "executed", reply: cleaned };
+
+    if (execResult.exitCode !== 0 && execResult.stderr) {
+      const brief = execResult.stderr.split("\n").filter(l => l.trim()).slice(0, 2).join(" | ");
+      return { type: "failed", reason: `执行失败(exit=${execResult.exitCode}): ${brief.slice(0, 100)}` };
+    }
+    return { type: "failed", reason: "无法解析执行结果" };
+  }
+
+  return { type: "failed", reason: "未知action类型" };
 }
 
 function isConfirmReply(text: string): boolean {
