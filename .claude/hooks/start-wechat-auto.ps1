@@ -31,16 +31,13 @@ Get-CimInstance Win32_Process -Filter "Name='bun.exe'" -ErrorAction SilentlyCont
 Remove-Item $pidPath -Force -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 3
 
-$parentPid = (Get-CimInstance Win32_Process -Filter "ProcessId=$PID").ParentProcessId
-
 $process = Start-Process `
   -FilePath "powershell" `
   -ArgumentList @(
     "-NoProfile",
     "-ExecutionPolicy", "Bypass",
     "-File", $launcherPath,
-    "-ProjectRoot", $projectRoot,
-    "-ParentPid", $parentPid
+    "-ProjectRoot", $projectRoot
   ) `
   -WindowStyle Hidden `
   -PassThru

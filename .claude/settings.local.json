@@ -56,7 +56,9 @@
       "Bash(tasklist /FI \"IMAGENAME eq bun.exe\")",
       "Bash(git restore *)",
       "Bash(git commit --amend -m ' *)",
-      "Bash(tasklist /FI \"PID eq $\\(cat 'C:/Users/len/ywwu_workspace/claude_skill_learn/.claude/wechat-auto.pid' 2>/dev/null || echo 0\\)\")"
+      "Bash(tasklist /FI \"PID eq $\\(cat 'C:/Users/len/ywwu_workspace/claude_skill_learn/.claude/wechat-auto.pid' 2>/dev/null || echo 0\\)\")",
+      "Bash(echo \"exit: $?\")",
+      "Bash(git add *)"
     ]
   },
   "hooks": {

@@ -53,7 +53,6 @@ interface AutoReplyConfig {
   statePath: string;
   pendingPath: string;
   pollMs: number;
-  parentPid: number;
 }
 
 const FALLBACK_REPLY = "已收到你的消息，我会尽快继续处理。";
@@ -61,11 +60,10 @@ const DEFAULT_POLL_MS = 8000;
 
 let processing = false;
 
-function parseArgs(): { projectRoot: string; once: boolean; parentPid: number } {
+function parseArgs(): { projectRoot: string; once: boolean } {
   const args = process.argv.slice(2);
   let projectRoot = process.cwd();
   let once = false;
-  let parentPid = 0;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -78,20 +76,12 @@ function parseArgs(): { projectRoot: string; once: boolean; parentPid: number } 
       i++;
     } else if (arg === "--once") {
       once = true;
-    } else if (arg === "--parent-pid") {
-      const value = args[i + 1];
-      const parsed = value ? Number.parseInt(value, 10) : NaN;
-      if (!Number.isFinite(parsed) || parsed <= 0) {
-        throw new Error("Invalid --parent-pid value");
-      }
-      parentPid = parsed;
-      i++;
     } else {
       throw new Error(`Unknown argument: ${arg}`);
     }
   }
 
-  return { projectRoot, once, parentPid };
+  return { projectRoot, once };
 }
 
 function resolveWeixinStateDir(): string {
@@ -165,15 +155,6 @@ function safeMarkInboxRead(markInboxRead: (ids: string[]) => number, ids: string
 function logLine(config: AutoReplyConfig, message: string): void {
   const line = `[${new Date().toISOString()}] ${message}`;
   console.log(line);
-}
-
-function isProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function loadAccount(stateDir: string): AccountData {
@@ -701,7 +682,7 @@ async function processUnreadMessages(config: AutoReplyConfig): Promise<number> {
 }
 
 async function main(): Promise<void> {
-  const { projectRoot, once, parentPid } = parseArgs();
+  const { projectRoot, once } = parseArgs();
   const claudeDir = join(projectRoot, ".claude");
   ensureDir(claudeDir);
 
@@ -710,7 +691,6 @@ async function main(): Promise<void> {
     statePath: join(claudeDir, "wechat-auto-state.json"),
     pendingPath: join(claudeDir, "wechat-auto-pending.jsonl"),
     pollMs: DEFAULT_POLL_MS,
-    parentPid,
   };
 
   const initialState = loadState(config.statePath);
@@ -732,11 +712,6 @@ async function main(): Promise<void> {
   logLine(config, `claude CLI available: ${claudeCheck.stdout.trim().slice(0, 80)}`);
 
   do {
-    if (config.parentPid && !isProcessAlive(config.parentPid)) {
-      logLine(config, `Parent process ${config.parentPid} exited, shutting down watcher`);
-      process.exit(0);
-    }
-
     try {
       await processUnreadMessages(config);
     } catch (e) {
