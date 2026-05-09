@@ -7,6 +7,6 @@ figure/
 .claude/wechat-auto-reply.json
 .claude/test-write.txt
 .claude/settings.local.json
-.claude/wechat-auto-state.json
-.claude/wechat-auto.log
+.claude/skills/pptx/
 test
+**/__pycache__/
