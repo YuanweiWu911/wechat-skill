@@ -3,11 +3,18 @@ name: wechat-skill-2
 description: 自动同步本地微信 inbox，导入消息上下文。后台 Watcher 会自动处理消息：闲聊直接回复、安全指令自动执行、风险操作等待确认。
 user-invocable: true
 argument-hint: "[--all] [--limit N]"
+disable-model-invocation: true
 ---
 
 # WeChat Skill 2.0
 
+## 隐私与安全提示
+
+使用本技能时请注意：微信消息将被导入 Claude 对话上下文并发送至 Anthropic API；消息以明文存储在本地 `~/.claude/channels/weixin/inbox.jsonl`；媒体文件下载到 `%TMP%/weixin-media/` 共享临时目录。
+
 ## 自动回复机制（Watcher 后台运行）
+
+Watcher 通过 SessionStart 钩子（`start-wechat-auto.ps1`）在每次 Claude Code 会话启动时自动在后台运行，无需确认。
 
 当用户在微信发消息时，Watcher 自动调用 LLM 分析语义并按以下路径处理：
 

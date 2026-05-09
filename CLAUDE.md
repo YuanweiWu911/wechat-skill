@@ -19,7 +19,7 @@ Skills are hot-reloaded: changes to `.claude/skills/` take effect within the cur
 
 ## Security: WeChat skill chain (`wechat-skill-2`)
 
-The WeChat integration spans four layers: SKILL.md → `collect-wechat.ps1` → `weixin-inbox.ps1` → `cc-weixin` plugin (GitHub: `qufei1993/cc-weixin`, v0.2.0). It communicates with WeChat's iLink Bot API at `https://ilinkai.weixin.qq.com`.
+The WeChat integration spans multiple layers: SKILL.md → `collect-wechat.ps1` / `wechat-approve.ps1` → `weixin-inbox.ps1` → `cc-weixin` plugin (GitHub: `qufei1993/cc-weixin`, v0.2.0). It communicates with WeChat's iLink Bot API at `https://ilinkai.weixin.qq.com`.
 
 Key risks to be aware of when modifying or extending this skill:
 
