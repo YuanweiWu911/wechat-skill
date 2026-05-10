@@ -1,0 +1,63 @@
+# CLAUDE_CN.md
+
+英文原版请见 `CLAUDE.md`。
+
+本文档为仓库根目录 `CLAUDE.md` 的中文阅读版，便于中文查看与维护。
+
+## 仓库用途
+
+这是一个用于学习、练习和原型验证 Claude Code 自定义技能的个人沙箱仓库。当前最主要的活跃项目是 `wechat-skill-2`，包含基于 Bun 的 watcher、PowerShell 启动脚本，以及位于 `test-watcher.ts` 的 watcher 回归测试。
+
+## Skill 开发
+
+自定义技能位于 `.claude/skills/<skill-name>/SKILL.md`。每个技能目录至少包含一个 `SKILL.md`，文件由 YAML frontmatter（如 `name`、`description` 及可选字段）和后续 Markdown 指令组成。
+
+创建或修改 skill 时：
+
+- 使用 `` !`command` `` 语法，在 Claude 看到技能内容前注入实时 shell 输出
+- 对有副作用的技能优先使用 `disable-model-invocation: true`；仅对需要 Claude 自动加载的技能省略该字段
+- 通过 `${CLAUDE_SKILL_DIR}` 引用脚本或附属文件
+
+`.claude/skills/` 下的技能支持热加载：修改会在当前会话内生效。
+
+## 测试
+
+- 主要回归入口：`bun run .\test-watcher.ts risk`
+- `test-watcher.ts` 包含协议、队列、风险确认、重试以及 risky-exec 探针测试
+- 修改 watcher 时，优先遵循 tests-first：先在 `test-watcher.ts` 里补最小复现，再修改生产代码，最后重跑针对性测试
+
+## Watcher 契约
+
+修改 `wechat-skill-2` 时，以下 watcher 行为应被视为契约，而不是建议：
+
+- **路径契约：** 每条输入消息必须且只能落到 `chat`、`executed`、`risky` 三条路径之一
+- **风险契约：** 创建、写入、删除、安装、执行脚本、修改配置等请求必须视为 `risky`，不能直接归入 `executed`
+- **确认契约：** 只要 `pendingConfirmation` 存在，像 `是` 这样的肯定回复必须解释为确认执行，像 `不` 这样的否定回复必须解释为取消
+- **状态契约：** 在等待确认期间，原始风险消息本身不能清空 `pendingConfirmation`
+- **回复契约：** 一条输入消息只应产生一个主结果；风险确认执行完成后，不能再继续落入闲聊分支发送额外回复
+- **删除契约：** 简单的项目内本地文件删除可以由 watcher 本地执行，但仅限项目根目录内的安全相对路径
+- **Ack 契约：** watcher 代码不能依赖进程内直接写 `~/.claude/channels/weixin/inbox-state.json`；未读确认应通过 `weixin-inbox.ps1 ack` 完成
+
+## 安全：微信技能链（`wechat-skill-2`）
+
+微信集成跨越多层：`SKILL.md` → `collect-wechat.ps1` / `wechat-approve.ps1` → `weixin-inbox.ps1` → `cc-weixin` 插件（GitHub：`qufei1993/cc-weixin`，版本 `v0.2.0`）。它与微信 iLink Bot API `https://ilinkai.weixin.qq.com` 通信。
+
+当前 watcher / 运行时结构：
+
+- 后台自动启动：`start-wechat-auto.ps1` 会启动 `start-wechat-auto-runner.ps1`，后者负责长驻运行 `wechat-auto-reply.ts` watcher
+- 单实例保护：启动/停止脚本通过 pid 文件和 runner 归属控制，避免误杀无关的 `bun.exe` 进程
+- 消息生命周期：watcher 在 `.claude/wechat-auto-state.json` 中跟踪 `classifying` / `classified` / `executing` / `replied` / `dead`
+- 风险行为：普通闲聊直接回复；安全读/搜/网页查询类任务直接执行；创建/写入/删除/脚本/安装/改配置类请求必须先确认
+- 风险删除兜底：已确认的简单项目内文件删除，可以由 watcher 本地执行，避免受 Claude 工具沙箱限制影响
+
+修改或扩展该 skill 时，需要注意的关键风险：
+
+- **第三方插件信任风险：** `cc-weixin` 来自未经审计的 GitHub 仓库。它以 `bun src/cli-inbox.ts` 运行，拥有完整微信账户能力（读取全部消息、发送回复、下载媒体）。若插件更新被污染，可能劫持已连接的微信账户
+- **隐私 / 数据外发：** 导入的微信消息会进入 Claude 对话上下文，并发送给 Anthropic API。所有聊天内容，包括媒体附件，都会流向外部服务器
+- **自动启动：** `SessionStart` 钩子 `start-wechat-auto.ps1` 会在每次 Claude Code 会话启动时，无需确认地自动启动微信轮询
+- **沙箱不对称：** watcher 进程可以直接读取 inbox 数据，但对 `~/.claude/channels/weixin/` 下某些文件的进程内写入，可能会被 Trae 沙箱拦截。因此已读确认应通过 `weixin-inbox.ps1 ack` 完成，而不要直接调用 `markInboxRead()` 写文件
+- **剪贴板暴露：** `cli-inbox.ts copy` 通过 `spawnSync("clip", ...)` 将消息内容写入 Windows 剪贴板，任何正在运行的应用都可能读取
+- **明文持久化：** 消息以未加密形式存储在 `~/.claude/channels/weixin/inbox.jsonl`。媒体文件下载到共享临时目录 `%TMP%/weixin-media/`
+- **PowerShell ExecutionPolicy Bypass：** 该链路中的所有 PowerShell 脚本都以 `-ExecutionPolicy Bypass` 运行。虽然这是 Claude Code 脚本常见做法，但也移除了一个基础安全网
+
+当前已具备的正向防护包括：认证 token 以 `chmod 600` 存储、配对码访问控制、会话过期处理、基于父进程 PID 的孤儿进程清理、单实例保护、重复 inbox 去重、风险确认状态保护、本地风险删除兜底，以及连续错误退避。

@@ -1,6 +1,8 @@
 .agents/
 documents/
 figure/
+.claude/risk-exec-probe.json
+.claude/skills/skill-creator
 .claude/wechat-auto-state.json
 .claude/wechat-auto.log
 .claude/wechat-auto.pid
@@ -8,5 +10,6 @@ figure/
 .claude/test-write.txt
 .claude/settings.local.json
 .claude/skills/pptx/
-test
 **/__pycache__/
+risk-test-run.log
+risk-timeout-probe-created.txt
