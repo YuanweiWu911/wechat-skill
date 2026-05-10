@@ -22,7 +22,7 @@ Skills are hot-reloaded: changes to `.claude/skills/` take effect within the cur
 ## Testing
 
 - Primary regression entrypoint: `bun run .\test-watcher.ts risk`
-- `test-watcher.ts` contains protocol, queueing, risk-confirmation, retry, and risky-exec probe tests
+- `test-watcher.ts` contains protocol, queueing, risk-confirmation, retry, risky-exec probe, and file-transfer whitelist / confirmation tests
 - For watcher changes, prefer tests-first: add the smallest focused repro in `test-watcher.ts`, then patch production code, then rerun the targeted suite
 
 ## Watcher Contract
@@ -35,6 +35,7 @@ When modifying `wechat-skill-2`, treat the watcher behavior below as a contract,
 - **State contract:** the original risky message must not clear `pendingConfirmation` while the system is waiting for confirmation
 - **Reply contract:** one inbound message should produce one primary outcome; a confirmed risky execution must not fall through and generate an extra chat-style reply
 - **Delete contract:** simple project-local file deletions may be handled by the watcher locally, but only for safe relative paths inside the project root
+- **File transfer contract:** project-local whitelisted single-file transfers may be handled locally by the watcher; files over `10MB` require a second confirmation before sending
 - **Ack contract:** watcher code must not rely on in-process writes to `~/.claude/channels/weixin/inbox-state.json`; unread acknowledgements should go through `weixin-inbox.ps1 ack`
 
 ## Security: WeChat skill chain (`wechat-skill-2`)
@@ -48,6 +49,7 @@ Current watcher/runtime layout:
 - Message lifecycle: watcher tracks `classifying` / `classified` / `executing` / `replied` / `dead` in `.claude/wechat-auto-state.json`
 - Risk behavior: simple chat replies are sent directly; safe read/search/web tasks execute directly; create/write/delete/script/install/config-changing requests require confirmation
 - Risk delete fallback: confirmed simple project-local file deletions can be executed locally by the watcher to avoid Claude tool sandbox limitations
+- File transfer behavior: project-local whitelisted single files can be sent as attachments directly; oversized files require confirmation; current matching is exact relative-path matching, not fuzzy filename search
 
 Key risks to be aware of when modifying or extending this skill:
 
@@ -59,4 +61,4 @@ Key risks to be aware of when modifying or extending this skill:
 - **Plaintext persistence:** Messages are stored unencrypted in `~/.claude/channels/weixin/inbox.jsonl`. Media downloads go to `%TMP%/weixin-media/`, a shared temp directory.
 - **PowerShell ExecutionPolicy Bypass:** All PowerShell scripts in this chain run with `-ExecutionPolicy Bypass`. Standard for Claude Code scripts but removes a safety net.
 
-Positive measures already in place: auth token stored with `chmod 600`, pairing-code access control, session-expiry handling, orphaned-process cleanup via parent-PID monitoring, single-instance protection, duplicate-inbox de-duping, risky-confirmation state protection, local risky-delete fallback, and consecutive-error backoff.
+Positive measures already in place: auth token stored with `chmod 600`, pairing-code access control, session-expiry handling, orphaned-process cleanup via parent-PID monitoring, single-instance protection, duplicate-inbox de-duping, risky-confirmation state protection, local risky-delete fallback, local whitelisted file-transfer handling with large-file confirmation, and consecutive-error backoff.

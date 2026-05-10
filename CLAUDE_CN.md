@@ -23,7 +23,7 @@
 ## 测试
 
 - 主要回归入口：`bun run .\test-watcher.ts risk`
-- `test-watcher.ts` 包含协议、队列、风险确认、重试以及 risky-exec 探针测试
+- `test-watcher.ts` 包含协议、队列、风险确认、重试、risky-exec 探针，以及文件传输白名单 / 大文件确认测试
 - 修改 watcher 时，优先遵循 tests-first：先在 `test-watcher.ts` 里补最小复现，再修改生产代码，最后重跑针对性测试
 
 ## Watcher 契约
@@ -36,6 +36,7 @@
 - **状态契约：** 在等待确认期间，原始风险消息本身不能清空 `pendingConfirmation`
 - **回复契约：** 一条输入消息只应产生一个主结果；风险确认执行完成后，不能再继续落入闲聊分支发送额外回复
 - **删除契约：** 简单的项目内本地文件删除可以由 watcher 本地执行，但仅限项目根目录内的安全相对路径
+- **文件传输契约：** 项目内白名单单文件发送可以由 watcher 本地执行；超过 `10MB` 的文件必须先进行二次确认
 - **Ack 契约：** watcher 代码不能依赖进程内直接写 `~/.claude/channels/weixin/inbox-state.json`；未读确认应通过 `weixin-inbox.ps1 ack` 完成
 
 ## 安全：微信技能链（`wechat-skill-2`）
@@ -49,6 +50,7 @@
 - 消息生命周期：watcher 在 `.claude/wechat-auto-state.json` 中跟踪 `classifying` / `classified` / `executing` / `replied` / `dead`
 - 风险行为：普通闲聊直接回复；安全读/搜/网页查询类任务直接执行；创建/写入/删除/脚本/安装/改配置类请求必须先确认
 - 风险删除兜底：已确认的简单项目内文件删除，可以由 watcher 本地执行，避免受 Claude 工具沙箱限制影响
+- 文件传输行为：项目内白名单单文件可以直接作为附件发送；超大文件需要先确认；当前只支持按相对路径精确匹配，不支持按文件名模糊搜索
 
 修改或扩展该 skill 时，需要注意的关键风险：
 
@@ -60,4 +62,4 @@
 - **明文持久化：** 消息以未加密形式存储在 `~/.claude/channels/weixin/inbox.jsonl`。媒体文件下载到共享临时目录 `%TMP%/weixin-media/`
 - **PowerShell ExecutionPolicy Bypass：** 该链路中的所有 PowerShell 脚本都以 `-ExecutionPolicy Bypass` 运行。虽然这是 Claude Code 脚本常见做法，但也移除了一个基础安全网
 
-当前已具备的正向防护包括：认证 token 以 `chmod 600` 存储、配对码访问控制、会话过期处理、基于父进程 PID 的孤儿进程清理、单实例保护、重复 inbox 去重、风险确认状态保护、本地风险删除兜底，以及连续错误退避。
+当前已具备的正向防护包括：认证 token 以 `chmod 600` 存储、配对码访问控制、会话过期处理、基于父进程 PID 的孤儿进程清理、单实例保护、重复 inbox 去重、风险确认状态保护、本地风险删除兜底、本地白名单文件发送与大文件确认，以及连续错误退避。
