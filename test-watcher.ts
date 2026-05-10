@@ -201,6 +201,14 @@ function runCommand(
   };
 }
 
+function runCollectWechat(args: string[]): CommandResult {
+  return runCommand(
+    "powershell",
+    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", join(skillDir, "collect-wechat.ps1"), ...args],
+    { timeout: 30000 },
+  );
+}
+
 function runRawCommand(
   command: string,
   args: string[],
@@ -1510,6 +1518,62 @@ function runWatcherTests(): TestResult[] {
       ? "PASS"
       : "FAIL",
     `start=${startForFallback.status} ready=${fallbackReady} pid=${fallbackPid ?? "null"} stop=${stopWithoutPid.status} fallbackStopped=${fallbackStopped} pidRemoved=${fallbackPidRemoved} output=${(stopWithoutPid.stdout || stopWithoutPid.stderr || stopWithoutPid.error || "无输出").slice(0, 160)}`,
+  );
+
+  const startForCollectStop = runCommand(
+    "powershell",
+    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", startScript],
+    { timeout: 30000 },
+  );
+  const collectStopReady = waitUntil(15000, () => {
+    const pid = readRegisteredRunnerPid(pidPath);
+    return pid !== null && processExists(pid);
+  });
+  const collectStopPid = readRegisteredRunnerPid(pidPath);
+  const collectStop = runCollectWechat(["--stop"]);
+  const collectStopPidRemoved = waitUntil(5000, () => !existsSync(pidPath));
+  const collectStopRunnerStopped =
+    collectStopPid === null ? false : waitUntil(8000, () => !processExists(collectStopPid));
+  push(
+    results,
+    "collect-wechat.ps1 --stop stops watcher and normalizes success text",
+    startForCollectStop.status === 0 &&
+      collectStopReady &&
+      collectStop.status === 0 &&
+      collectStop.stdout.includes("已停止 watcher。") &&
+      collectStopPidRemoved &&
+      collectStopRunnerStopped
+      ? "PASS"
+      : "FAIL",
+    `start=${startForCollectStop.status} ready=${collectStopReady} stop=${collectStop.status} pid=${collectStopPid ?? "null"} pidRemoved=${collectStopPidRemoved} runnerStopped=${collectStopRunnerStopped} stdout=${collectStop.stdout || "无输出"} stderr=${collectStop.stderr || "无输出"} error=${collectStop.error || "无"}`,
+  );
+
+  runCommand(
+    "powershell",
+    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", stopScript],
+    { timeout: 30000 },
+  );
+  const collectStopNoop = runCollectWechat(["--stop"]);
+  push(
+    results,
+    "collect-wechat.ps1 --stop reports watcher not running",
+    collectStopNoop.status === 0 && collectStopNoop.stdout.includes("watcher 未运行，无需停止。")
+      ? "PASS"
+      : "FAIL",
+    `status=${collectStopNoop.status} stdout=${collectStopNoop.stdout || "无输出"} stderr=${collectStopNoop.stderr || "无输出"} error=${collectStopNoop.error || "无"}`,
+  );
+
+  const collectStopConflict = runCollectWechat(["--stop", "--limit", "10"]);
+  push(
+    results,
+    "collect-wechat.ps1 --stop rejects mixed sync arguments",
+    collectStopConflict.status !== 0 &&
+      /参数冲突：--stop 不能与 --all 或 --limit 同时使用。/.test(
+        [collectStopConflict.stdout, collectStopConflict.stderr, collectStopConflict.error].join("\n"),
+      )
+      ? "PASS"
+      : "FAIL",
+    `status=${collectStopConflict.status} stdout=${collectStopConflict.stdout || "无输出"} stderr=${collectStopConflict.stderr || "无输出"} error=${collectStopConflict.error || "无"}`,
   );
 
   const bunPath = resolveBunPath();
