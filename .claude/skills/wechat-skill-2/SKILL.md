@@ -1,6 +1,6 @@
 ---
 name: wechat-skill-2
-description: 自动同步本地微信 inbox，导入消息上下文。后台 Watcher 会自动处理消息：闲聊直接回复、安全指令自动执行、风险操作等待确认。
+description: 自动同步本地微信 inbox，导入消息上下文。后台 Watcher 会自动处理消息：闲聊直接回复、安全指令自动执行、创建/写入/删除等风险操作等待确认。
 user-invocable: true
 argument-hint: "[--all] [--limit N]"
 disable-model-invocation: true
@@ -28,9 +28,50 @@ Watcher 通过 SessionStart 钩子（`start-wechat-auto.ps1`）在每次 Claude 
 安全操作示例：查看目录、搜索文件、读取内容、获取信息、查询天气、搜索网络。
 
 ### 路径 C：风险操作
-用户要求删除文件、修改系统、安装软件等 → Watcher 不执行，通过微信询问确认 → 用户回复"是"则执行 → 回复"不"则取消 → 本轮结束。
+用户要求创建文件、写入文件、删除文件、修改系统、安装软件、执行脚本等 → Watcher 不直接执行，通过微信询问确认 → 用户回复"是"则执行 → 回复"不"则取消 → 本轮结束。
 
-风险操作示例：删除文件、修改配置、安装程序、执行脚本。
+风险操作示例：创建文件、写入文件、删除文件、修改配置、安装程序、执行脚本。
+
+## Watcher 当前行为
+
+- 单实例运行：`start-wechat-auto.ps1` / `start-wechat-auto-runner.ps1` 会避免重复启动与互相抢占。
+- 去重读取：Watcher 会对 `inbox.jsonl` 中重复的 message id 去重，避免重复恢复和重复回复。
+- 风险确认稳定：原始风险消息不会在待确认期间清空 `pendingConfirmation`，用户回复"是" / "不"会优先命中确认分支。
+- 风险执行兜底：对确认后的简单项目内文件删除（如 `删除test.txt`），Watcher 会优先在本地执行删除，避免受 Claude 工具沙箱限制影响。
+
+## 行为契约
+
+Claude 在参与 `wechat-skill-2` 的分类、执行、回复时，必须遵守以下契约：
+
+### 1. 分类契约
+
+- 每条消息只能落入 `chat`、`executed`、`risky` 这 3 条业务路径之一。
+- 纯闲聊、问候、寒暄优先归类为 `chat`。
+- 读取目录、搜索内容、读取文件、查询天气/网络信息等只读或查询类操作归类为 `executed`。
+- 创建文件、写入文件、删除文件、执行脚本、安装软件、修改配置、修改系统状态等，必须归类为 `risky`，不得直接执行。
+
+### 2. 风险确认契约
+
+- 风险操作必须先发送确认提示，再等待用户回复。
+- 用户回复 `是`、`好`、`可以`、`确认`、`yes` 等确认词时，优先解释为“确认执行”，不得回落到普通闲聊。
+- 用户回复 `不`、`取消`、`no` 等拒绝词时，优先解释为“取消执行”。
+- 在待确认期间，原始风险消息本身不得清空待确认状态，也不得被重新当成一条新请求处理。
+
+### 3. 删除执行契约
+
+- 对确认后的简单项目内文件删除请求，Watcher 可以直接在本地执行删除。
+- 仅允许删除项目根目录内的相对路径文件。
+- 包含绝对路径、盘符路径、根路径、`..` 越界路径的删除请求，不得走本地删除捷径。
+
+### 4. 回复契约
+
+- 每条消息最多触发一条主回复，不得在风险确认完成后再追加一条普通闲聊回复。
+- 风险执行完成后，必须返回明确结果，例如“已创建”“已删除”“已取消”“执行失败”。
+
+### 5. 未读确认契约
+
+- Watcher 不应在受限进程内直接写 `~/.claude/channels/weixin/inbox-state.json`。
+- 标记消息已读必须通过 `weixin-inbox.ps1 ack` 完成，以规避 Trae 沙箱对插件状态目录写入的限制。
 
 ## 你必须在每次调用后自动完成以下 3 步
 
@@ -46,7 +87,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/collect
 
 ### 第 2 步：检查待处理风险确认（可选）
 
-如果 Watcher 暂停或需手动审核风险操作：
+如果 Watcher 暂停、崩溃，或需手动审核风险操作：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/wechat-approve.ps1" list
@@ -75,7 +116,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/wechat-
 
 ### 第 3 步：展示结果
 
-简短报告：导入了多少条消息，Watcher 已自动处理了多少条。
+简短报告：导入了多少条消息，Watcher 已自动处理了多少条；如存在风险确认，说明是已自动发出确认还是仍待人工审核。
 
 ## 发送微信消息的方法
 

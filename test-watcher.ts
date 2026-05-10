@@ -1,6 +1,6 @@
-import { existsSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, normalize, resolve } from "node:path";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 
 type TestStatus = "PASS" | "FAIL" | "WARN";
@@ -27,6 +27,13 @@ interface RawCommandResult {
   error?: string;
 }
 
+interface ClaudeRunResultForTest {
+  status: number | null;
+  stdout: string;
+  stderr: string;
+  error?: string;
+}
+
 type ParsedAction =
   | { action: "chat" | "executed"; reply: string }
   | { action: "risky"; warning: string; command?: string };
@@ -50,6 +57,12 @@ interface QueueState {
   };
 }
 
+interface PendingConfirmationCase {
+  chatId: string;
+  inboxId: string;
+  pendingAction: string;
+}
+
 const projectRoot = process.cwd();
 const skillDir = join(projectRoot, ".claude", "skills", "wechat-skill-2");
 const hooksDir = join(projectRoot, ".claude", "hooks");
@@ -68,14 +81,14 @@ function buildClassificationPrompt(text: string): string {
     '  {"action":"chat","reply":"你的自然回复"}',
     "- 安全操作（查看文件、搜索内容、读取信息、查询实时数据等）→ 输出JSON:",
     '  {"action":"executed","reply":"简述你准备做什么"}',
-    "- 风险操作（删除文件、修改系统、安装软件、执行脚本等）→ 输出JSON:",
+    "- 风险操作（删除文件、创建文件、写入文件、修改系统、安装软件、执行脚本等）→ 输出JSON:",
     '  {"action":"risky","warning":"风险说明","command":"操作简述"}',
     "",
     "铁律：",
     "- 你的回答必须以 { 开头，以 } 结尾，必须是合法JSON",
     "- 不要输出任何JSON以外的文字、解释、问候、或Markdown",
     "- 闲聊回复要自然亲切，用简体中文",
-    "- 风险判断从严：涉及删、改、装、脚本字眼的都是风险",
+    "- 风险判断从严：涉及删、改、建、写、装、脚本字眼的都是风险",
   ].join("\n");
 }
 
@@ -85,6 +98,20 @@ function buildExecutePrompt(text: string): string {
     "",
     "可用工具：Glob（文件匹配）、Grep（内容搜索）、Read（读取文件）、Bash（Shell命令）、WebSearch（网络搜索）、WebFetch（读取网页）。",
     "执行完成后用简体中文简洁总结结果，必须输出合法JSON:",
+    '  {"action":"executed","reply":"执行结果文本"}',
+    "",
+    "铁律：只输出一行合法JSON，绝不要任何额外文字。",
+  ].join("\n");
+}
+
+function buildRiskyExecutePromptForTest(originalText: string, command: string): string {
+  const action = command || originalText;
+  return [
+    `用户要求："${originalText}"，已获得用户确认，请立即执行。`,
+    `具体操作：${action}`,
+    "",
+    "可用工具：Glob（文件匹配）、Grep（内容搜索）、Read（读取文件）、Write（写入文件）、Bash（Shell命令）、WebSearch（网络搜索）、WebFetch（读取网页）。",
+    "执行完成后用简体中文简洁输出结果，必须输出合法JSON:",
     '  {"action":"executed","reply":"执行结果文本"}',
     "",
     "铁律：只输出一行合法JSON，绝不要任何额外文字。",
@@ -279,6 +306,111 @@ function dedupeQueueEntries(entries: QueueEntry[]): QueueEntry[] {
     unique.push(entry);
   }
   return unique;
+}
+
+function isConfirmReplyForTest(text: string): boolean {
+  return /^(是|好|可以|行|对|确认|ok|yes|y|没错|嗯|对的|是的)/i.test(text.trim());
+}
+
+function isDenyReplyForTest(text: string): boolean {
+  return /^(不|否|别|取消|no|n|算了|不要)/i.test(text.trim());
+}
+
+function decidePendingBranchCurrent(
+  entry: QueueEntry,
+  pending?: PendingConfirmationCase,
+): "confirm" | "deny" | "ignore_original" | "clear_and_new" | "new_request" {
+  if (!pending || entry.fromUserId !== pending.chatId) {
+    return "new_request";
+  }
+
+  if (entry.id === pending.inboxId) {
+    return "ignore_original";
+  }
+
+  if (isConfirmReplyForTest(entry.text)) {
+    return "confirm";
+  }
+
+  if (isDenyReplyForTest(entry.text)) {
+    return "deny";
+  }
+
+  return "clear_and_new";
+}
+
+function applyRiskConfirmStateCurrent(state: QueueState, confirmEntry: QueueEntry): QueueState {
+  const advancedState: QueueState = {
+    ...state,
+    messageStates: {
+      ...state.messageStates,
+      [confirmEntry.id]: { status: "replied", failCount: 0 },
+    },
+  };
+
+  void advancedState;
+
+  // Current production behavior: save pendingConfirmation: undefined using stale currentState,
+  // which overwrites the just-advanced replied lifecycle for the confirm message.
+  return {
+    ...state,
+    pendingConfirmation: undefined,
+  };
+}
+
+function applyRiskConfirmStateExpected(state: QueueState, confirmEntry: QueueEntry): QueueState {
+  return {
+    ...state,
+    messageStates: {
+      ...state.messageStates,
+      [confirmEntry.id]: { status: "replied", failCount: 0 },
+    },
+    pendingConfirmation: undefined,
+  };
+}
+
+function getRiskyExecRetryReasonForTest(result: ClaudeRunResultForTest): "empty_stdout" | "timeout" | null {
+  const stderrText = `${result.stderr}\n${result.error || ""}`;
+  if (!result.stdout.trim() && result.status === 0) {
+    return "empty_stdout";
+  }
+  if (/ETIMEDOUT|timed out after \d+ms/i.test(stderrText)) {
+    return "timeout";
+  }
+  return null;
+}
+
+function extractSimpleDeleteTargetForTest(text: string): string | null {
+  const trimmed = text.trim();
+  const patterns = [
+    /^(?:请)?(?:准备)?删除(?:文件)?\s*([A-Za-z0-9._\-\\/]+?)(?:\s*文件)?$/i,
+  ];
+  for (const pattern of patterns) {
+    const match = trimmed.match(pattern);
+    if (match?.[1]) {
+      return match[1];
+    }
+  }
+  return null;
+}
+
+function resolveSafeProjectDeletePathForTest(projectRootPath: string, text: string): string | null {
+  const target = extractSimpleDeleteTargetForTest(text);
+  if (!target) return null;
+  if (/^[a-zA-Z]:/.test(target) || target.startsWith("/") || target.startsWith("\\")) {
+    return null;
+  }
+  const normalizedTarget = target.replace(/[\\/]+/g, "\\");
+  if (normalizedTarget.split("\\").some((segment) => segment === ".." || segment.length === 0)) {
+    return null;
+  }
+  const resolved = resolve(projectRootPath, normalizedTarget);
+  const normalizedProjectRoot = normalize(projectRootPath).toLowerCase();
+  const normalizedResolved = normalize(resolved).toLowerCase();
+  if (normalizedResolved !== normalizedProjectRoot && !normalizedResolved.startsWith(`${normalizedProjectRoot}\\`)) {
+    return null;
+  }
+  return resolved;
 }
 
 function selectCurrentQueueEntry(unreadEntries: QueueEntry[], state: QueueState): QueueEntry | null {
@@ -754,6 +886,303 @@ function runQueueTests(): TestResult[] {
   return results;
 }
 
+function runRiskTests(): TestResult[] {
+  const results: TestResult[] = [];
+  const createPrompt = buildClassificationPrompt("创建test.txt");
+
+  push(
+    results,
+    "classification prompt marks create file as risky",
+    createPrompt.includes("创建文件") && createPrompt.includes("写入文件") ? "PASS" : "FAIL",
+    "创建/写入文件属于会修改文件系统的操作，分类提示词必须明确将其归为 risky，避免被模型当成 executed 直接执行",
+  );
+
+  const riskyEntry: QueueEntry = {
+    id: "risk-delete-test-txt",
+    text: "删除test.txt文件",
+    fromUserId: "chat-risk",
+  };
+  const confirmEntry: QueueEntry = {
+    id: "risk-confirm-yes",
+    text: "是",
+    fromUserId: "chat-risk",
+  };
+  const pending: PendingConfirmationCase = {
+    chatId: "chat-risk",
+    inboxId: riskyEntry.id,
+    pendingAction: riskyEntry.text,
+  };
+
+  const currentOriginalDecision = decidePendingBranchCurrent(riskyEntry, pending);
+  push(
+    results,
+    "original risky message should not clear pending",
+    currentOriginalDecision === "ignore_original" ? "PASS" : "FAIL",
+    `当前分支结果=${currentOriginalDecision}；原始风险消息重复出现时，不应清空 pending 并重新分类`,
+  );
+
+  let pendingAfterOriginal: PendingConfirmationCase | undefined = pending;
+  if (currentOriginalDecision === "clear_and_new") {
+    pendingAfterOriginal = undefined;
+  }
+  const confirmDecision = decidePendingBranchCurrent(confirmEntry, pendingAfterOriginal);
+  push(
+    results,
+    "yes reply should still route to pending confirm",
+    confirmDecision === "confirm" ? "PASS" : "FAIL",
+    `原始风险消息重复后，再收到"是"时当前结果=${confirmDecision}；期望仍为 confirm`,
+  );
+
+  const preConfirmState: QueueState = {
+    messageStates: {
+      [riskyEntry.id]: { status: "replied", failCount: 0 },
+    },
+    deadLetterIds: [],
+    pendingConfirmation: {
+      chatId: pending.chatId,
+    },
+  };
+  const currentConfirmState = applyRiskConfirmStateCurrent(preConfirmState, confirmEntry);
+  push(
+    results,
+    "stale state overwrite reproduces confirm reply loss",
+    currentConfirmState.messageStates[confirmEntry.id]?.status !== "replied" ? "PASS" : "FAIL",
+    "旧逻辑会在清除 pendingConfirmation 时覆盖掉确认消息的 replied 状态，这正是“是”被二次处理的根因",
+  );
+
+  const currentReplayPick = selectCurrentQueueEntry([confirmEntry], currentConfirmState);
+  push(
+    results,
+    "stale state overwrite reproduces confirm requeue",
+    currentReplayPick !== null ? "PASS" : "FAIL",
+    currentReplayPick
+      ? `当前状态下同一条确认消息会再次入队：${currentReplayPick.id}`
+      : "旧逻辑未复现确认消息二次入队，和历史现象不一致",
+  );
+
+  const expectedConfirmState = applyRiskConfirmStateExpected(preConfirmState, confirmEntry);
+  push(
+    results,
+    "merged state keeps confirm reply replied",
+    expectedConfirmState.messageStates[confirmEntry.id]?.status === "replied" ? "PASS" : "FAIL",
+    "修复后应先保留最新 messageStates，再清除 pendingConfirmation",
+  );
+  const fixedReplayPick = selectCurrentQueueEntry([confirmEntry], expectedConfirmState);
+  push(
+    results,
+    "merged state prevents confirm requeue",
+    fixedReplayPick === null ? "PASS" : "FAIL",
+    fixedReplayPick
+      ? `修复后确认消息仍再次入队：${fixedReplayPick.id}`
+      : "修复后确认消息会被正确跳过，不再进入聊天/分类分支",
+  );
+  push(
+    results,
+    "risky exec timeout should trigger retry",
+    getRiskyExecRetryReasonForTest({
+      status: -1,
+      stdout: "",
+      stderr: "claude timed out after 120000ms\nspawnSync claude ETIMEDOUT",
+    }) === "timeout" ? "PASS" : "FAIL",
+    "真实 RiskyExec 删除失败日志包含 timed out after 120000ms / ETIMEDOUT，命中后应立即重试一次，而不是直接回复执行失败",
+  );
+  push(
+    results,
+    "risky exec empty stdout should still retry",
+    getRiskyExecRetryReasonForTest({
+      status: 0,
+      stdout: "",
+      stderr: "",
+    }) === "empty_stdout" ? "PASS" : "FAIL",
+    "保留现有空 stdout 重试语义，避免修复超时时回退掉已有兜底",
+  );
+  push(
+    results,
+    "risky exec non-timeout failure should not retry",
+    getRiskyExecRetryReasonForTest({
+      status: 1,
+      stdout: "",
+      stderr: "permission denied",
+    }) === null ? "PASS" : "FAIL",
+    "普通失败不应无限扩大重试面，只针对空输出和超时做最小容错",
+  );
+  push(
+    results,
+    "extract delete target from compact command",
+    extractSimpleDeleteTargetForTest("删除test.txt") === "test.txt" ? "PASS" : "FAIL",
+    `提取结果=${extractSimpleDeleteTargetForTest("删除test.txt") || "(null)"}`,
+  );
+  push(
+    results,
+    "extract delete target from explicit file command",
+    extractSimpleDeleteTargetForTest("删除文件 test.txt") === "test.txt" ? "PASS" : "FAIL",
+    `提取结果=${extractSimpleDeleteTargetForTest("删除文件 test.txt") || "(null)"}`,
+  );
+  push(
+    results,
+    "extract delete target from prepared command",
+    extractSimpleDeleteTargetForTest("准备删除 test.txt 文件") === "test.txt" ? "PASS" : "FAIL",
+    `提取结果=${extractSimpleDeleteTargetForTest("准备删除 test.txt 文件") || "(null)"}`,
+  );
+  push(
+    results,
+    "reject parent traversal delete target",
+    resolveSafeProjectDeletePathForTest(projectRoot, "删除 ../secret.txt") === null ? "PASS" : "FAIL",
+    "应拒绝删除项目根目录之外的路径",
+  );
+  const safeDeletePath = resolveSafeProjectDeletePathForTest(projectRoot, "删除 test.txt");
+  push(
+    results,
+    "resolve simple delete target inside project",
+    safeDeletePath === join(projectRoot, "test.txt") ? "PASS" : "FAIL",
+    `解析路径=${safeDeletePath || "(null)"}`,
+  );
+
+  const claudePath = resolveClaudePath();
+  if (!claudePath) {
+    push(results, "resolve claude path for risky exec probe", "FAIL", "无法定位 claude 可执行文件");
+  } else {
+    const env = {
+      ANTHROPIC_MODEL: process.env.ANTHROPIC_MODEL_WATCHER || "claude-haiku-4-5-20251001",
+    };
+    const timeoutMsRaw = Number.parseInt(process.env.API_TIMEOUT_MS || "", 10);
+    const timeoutMs = Number.isFinite(timeoutMsRaw) && timeoutMsRaw > 0 ? timeoutMsRaw : 120000;
+    const createProbePath = join(projectRoot, "risk-create-probe.txt");
+    const deleteProbePath = join(projectRoot, "risk-delete-probe.txt");
+    const probeReportPath = join(projectRoot, ".claude", "risk-exec-probe.json");
+
+    rmSync(createProbePath, { force: true });
+    rmSync(deleteProbePath, { force: true });
+    rmSync(probeReportPath, { force: true });
+
+    const createPrompt = buildRiskyExecutePromptForTest("创建 risk-create-probe.txt", "创建 risk-create-probe.txt 文件");
+    const createResult = runCommand(
+      claudePath,
+      ["--permission-mode", "bypassPermissions", "--tools", "Bash,Read,Write,WebSearch,WebFetch,Glob,Grep"],
+      { env, input: createPrompt, timeout: timeoutMs + 10000 },
+    );
+    const createParsed = parseActionPayload(createResult.stdout);
+    const createExistsAfter = existsSync(createProbePath);
+    push(
+      results,
+      "risky exec probe create file",
+      createResult.status === 0 && createParsed?.action === "executed" && createExistsAfter ? "PASS" : "FAIL",
+      createParsed
+        ? `status=${createResult.status} parsed=${JSON.stringify(createParsed).slice(0, 180)} fileExists=${createExistsAfter}`
+        : `status=${createResult.status} stdout=${createResult.stdout.slice(0, 160)} stderr=${(createResult.stderr || createResult.error || "").slice(0, 180)} fileExists=${createExistsAfter}`,
+    );
+
+    const deletePrep = runCommand("powershell", ["-NoProfile", "-Command", `Set-Content -Path '${deleteProbePath}' -Value 'probe' -Encoding UTF8`], { timeout: 5000 });
+    void deletePrep;
+    const deletePrompt = buildRiskyExecutePromptForTest("删除 risk-delete-probe.txt", "准备删除 risk-delete-probe.txt 文件");
+    const deleteResult = runCommand(
+      claudePath,
+      ["--permission-mode", "bypassPermissions", "--tools", "Bash,Read,Write,WebSearch,WebFetch,Glob,Grep"],
+      { env, input: deletePrompt, timeout: timeoutMs + 10000 },
+    );
+    const deleteParsed = parseActionPayload(deleteResult.stdout);
+    const deleteExistsAfter = existsSync(deleteProbePath);
+    rmSync(deleteProbePath, { force: true });
+    const aliasDeletePrep = runCommand("powershell", ["-NoProfile", "-Command", `Set-Content -Path '${deleteProbePath}' -Value 'probe-alias' -Encoding UTF8`], { timeout: 5000 });
+    void aliasDeletePrep;
+    const aliasDeleteResult = runCommand(
+      "claude",
+      ["--permission-mode", "bypassPermissions", "--tools", "Bash,Read,Write,WebSearch,WebFetch,Glob,Grep"],
+      { env, input: deletePrompt, timeout: timeoutMs + 10000 },
+    );
+    const aliasDeleteParsed = parseActionPayload(aliasDeleteResult.stdout);
+    const aliasDeleteExistsAfter = existsSync(deleteProbePath);
+    writeFileSync(
+      probeReportPath,
+      JSON.stringify({
+        claudePath,
+        timeoutMs,
+        create: {
+          status: createResult.status,
+          signal: createResult.signal,
+          stdout: createResult.stdout,
+          stderr: createResult.stderr,
+          error: createResult.error,
+          parsed: createParsed,
+          fileExistsAfter: createExistsAfter,
+        },
+        delete: {
+          status: deleteResult.status,
+          signal: deleteResult.signal,
+          stdout: deleteResult.stdout,
+          stderr: deleteResult.stderr,
+          error: deleteResult.error,
+          parsed: deleteParsed,
+          fileExistsAfter: deleteExistsAfter,
+        },
+        aliasDelete: {
+          status: aliasDeleteResult.status,
+          signal: aliasDeleteResult.signal,
+          stdout: aliasDeleteResult.stdout,
+          stderr: aliasDeleteResult.stderr,
+          error: aliasDeleteResult.error,
+          parsed: aliasDeleteParsed,
+          fileExistsAfter: aliasDeleteExistsAfter,
+        },
+      }, null, 2),
+      "utf-8",
+    );
+    push(
+      results,
+      "risky exec probe delete file",
+      deleteResult.status === 0 && deleteParsed?.action === "executed" && !deleteExistsAfter ? "PASS" : "FAIL",
+      deleteParsed
+        ? `status=${deleteResult.status} parsed=${JSON.stringify(deleteParsed).slice(0, 180)} fileExists=${deleteExistsAfter}`
+        : `status=${deleteResult.status} stdout=${deleteResult.stdout.slice(0, 160)} stderr=${(deleteResult.stderr || deleteResult.error || "").slice(0, 180)} fileExists=${deleteExistsAfter}`,
+    );
+    push(
+      results,
+      "risky exec probe delete file via alias claude",
+      aliasDeleteResult.status === 0 && aliasDeleteParsed?.action === "executed" && !aliasDeleteExistsAfter ? "PASS" : "FAIL",
+      aliasDeleteParsed
+        ? `status=${aliasDeleteResult.status} parsed=${JSON.stringify(aliasDeleteParsed).slice(0, 180)} fileExists=${aliasDeleteExistsAfter}`
+        : `status=${aliasDeleteResult.status} stdout=${aliasDeleteResult.stdout.slice(0, 160)} stderr=${(aliasDeleteResult.stderr || aliasDeleteResult.error || "").slice(0, 180)} fileExists=${aliasDeleteExistsAfter}`,
+    );
+
+    rmSync(createProbePath, { force: true });
+    rmSync(deleteProbePath, { force: true });
+  }
+
+  const logPath = join(projectRoot, ".claude", "wechat-auto.log");
+  if (existsSync(logPath)) {
+    const logText = readFileSync(logPath, "utf-8");
+    const recreateBug =
+      logText.includes('Processing: o9cq800Z_OcxBhGABZk4agJWxLP0@im.wechat:7459029455685880000 text="请创建测试文件，test.txt"') &&
+      logText.includes('Risk warn sent: "创建文件属于写操作，将修改文件系统内容"') &&
+      logText.includes("Non-confirm while risky-pending; treating as new request");
+    push(
+      results,
+      "log reproduces pending cleared by original risky message",
+      recreateBug ? "PASS" : "WARN",
+      recreateBug
+        ? "历史日志已复现：同一条创建 test.txt 的原始风险消息在发出确认后再次进入 pending 分支，并触发 Non-confirm 清空 pending"
+        : "未在日志中找到该复现片段",
+    );
+
+    const yesMisrouted =
+      logText.includes('Processing: o9cq800Z_OcxBhGABZk4agJWxLP0@im.wechat:7459030188791553000 text="是"') &&
+      !logText.includes('Risk confirm YES for "删除test.txt文件"');
+    push(
+      results,
+      "log reproduces yes reply lost after pending cleared",
+      yesMisrouted ? "PASS" : "WARN",
+      yesMisrouted
+        ? '历史日志已复现：用户对删除 test.txt 回复"是"后，没有进入 Risk confirm YES，而是继续重复风险确认/重分类'
+        : '日志中未看到该误路由片段',
+    );
+  } else {
+    push(results, "log reproduces pending cleared by original risky message", "WARN", "缺少 wechat-auto.log，已跳过");
+    push(results, "log reproduces yes reply lost after pending cleared", "WARN", "缺少 wechat-auto.log，已跳过");
+  }
+
+  return results;
+}
+
 function runWatcherTests(): TestResult[] {
   const results: TestResult[] = [];
   const pidPath = join(projectRoot, ".claude", "wechat-auto.pid");
@@ -850,9 +1279,13 @@ function main(): void {
     overallOk = printResults("队列测试", runQueueTests()) && overallOk;
   }
 
-  if (!["env", "scripts", "classify", "watcher", "protocol", "encoding", "paths", "queue", "all"].includes(mode)) {
+  if (mode === "risk" || mode === "all") {
+    overallOk = printResults("风险确认测试", runRiskTests()) && overallOk;
+  }
+
+  if (!["env", "scripts", "classify", "watcher", "protocol", "encoding", "paths", "queue", "risk", "all"].includes(mode)) {
     console.error(`未知模式: ${mode}`);
-    console.error("用法: bun run test-watcher.ts [env|scripts|classify|watcher|protocol|encoding|paths|queue|all]");
+    console.error("用法: bun run test-watcher.ts [env|scripts|classify|watcher|protocol|encoding|paths|queue|risk|all]");
     process.exit(1);
   }
 

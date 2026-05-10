@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
 
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, normalize, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 
@@ -224,11 +224,27 @@ function savePendingReply(pendingPath: string, reply: PendingReply): void {
   appendFileSync(pendingPath, JSON.stringify(reply) + "\n", "utf-8");
 }
 
-function safeMarkInboxRead(markInboxRead: (ids: string[]) => number, ids: string[], config: AutoReplyConfig): void {
+async function safeMarkInboxRead(ids: string[], config: AutoReplyConfig): Promise<void> {
+  if (ids.length === 0) return;
+  const scriptPath = join(config.projectRoot, ".claude", "skills", "wechat-skill-2", "weixin-inbox.ps1");
   try {
-    markInboxRead(ids);
+    const result = spawnSync(
+      "powershell.exe",
+      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath, "ack", ...ids],
+      {
+        cwd: config.projectRoot,
+        encoding: "utf-8",
+        timeout: 30000,
+        env: { ...process.env, BUN_UTF8: "1" },
+      },
+    );
+    if (result.status !== 0) {
+      const stderr = (result.stderr || "").trim();
+      const stdout = (result.stdout || "").trim();
+      throw new Error(stderr || stdout || `ack exited with code ${result.status}`);
+    }
   } catch (e) {
-    logLine(config, `markInboxRead EPERM (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+    logLine(config, `markInboxRead failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
@@ -252,7 +268,6 @@ async function importWeixinModules(pluginRoot: string) {
 
   const inbox = await load<{
     listInboxEntries(options?: { unreadOnly?: boolean; limit?: number }): InboxEntry[];
-    markInboxRead(ids: string[]): number;
   }>("src/inbox.ts");
   const send = await load<{
     sendText(params: {
@@ -303,14 +318,14 @@ function buildUnifiedPrompt(entry: InboxEntry): string {
     '  {"action":"chat","reply":"你的自然回复"}',
     "- 安全操作（查看文件、搜索内容、读取信息、查询实时数据等）→ 输出JSON:",
     '  {"action":"executed","reply":"简述你准备做什么"}',
-    "- 风险操作（删除文件、修改系统、安装软件、执行脚本等）→ 输出JSON:",
+    "- 风险操作（删除文件、创建文件、写入文件、修改系统、安装软件、执行脚本等）→ 输出JSON:",
     '  {"action":"risky","warning":"风险说明","command":"操作简述"}',
     "",
     "铁律：",
     "- 你的回答必须以 { 开头，以 } 结尾，必须是合法JSON",
     "- 不要输出任何JSON以外的文字、解释、问候、或Markdown",
     "- 闲聊回复要自然亲切，用简体中文",
-    "- 风险判断从严：涉及删、改、装、脚本字眼的都是风险",
+    "- 风险判断从严：涉及删、改、建、写、装、脚本字眼的都是风险",
   ].join("\n");
 }
 
@@ -470,6 +485,58 @@ function parseActionJson(stdout: string): ActionResult | null {
   return null;
 }
 
+function getRiskyExecRetryReason(result: { stdout: string; stderr: string; exitCode: number }): "empty_stdout" | "timeout" | null {
+  if (!result.stdout.trim() && result.exitCode === 0) {
+    return "empty_stdout";
+  }
+  if (/ETIMEDOUT|timed out after \d+ms/i.test(result.stderr)) {
+    return "timeout";
+  }
+  return null;
+}
+
+function extractSimpleDeleteTarget(text: string): string | null {
+  const trimmed = text.trim();
+  const match = trimmed.match(/^(?:请)?(?:准备)?删除(?:文件)?\s*([A-Za-z0-9._\-\\/]+?)(?:\s*文件)?$/i);
+  return match?.[1] || null;
+}
+
+function resolveSafeProjectDeletePath(projectRoot: string, actionText: string): string | null {
+  const target = extractSimpleDeleteTarget(actionText);
+  if (!target) return null;
+  if (/^[a-zA-Z]:/.test(target) || target.startsWith("/") || target.startsWith("\\")) {
+    return null;
+  }
+  const normalizedTarget = target.replace(/[\\/]+/g, "\\");
+  if (normalizedTarget.split("\\").some((segment) => segment === ".." || segment.length === 0)) {
+    return null;
+  }
+  const resolved = resolve(projectRoot, normalizedTarget);
+  const normalizedProjectRoot = normalize(projectRoot).toLowerCase();
+  const normalizedResolved = normalize(resolved).toLowerCase();
+  if (normalizedResolved !== normalizedProjectRoot && !normalizedResolved.startsWith(`${normalizedProjectRoot}\\`)) {
+    return null;
+  }
+  return resolved;
+}
+
+function tryExecuteSimpleRiskyDelete(projectRoot: string, originalText: string, command: string): ActionResult | null {
+  const actionText = command || originalText;
+  const targetPath = resolveSafeProjectDeletePath(projectRoot, actionText) || resolveSafeProjectDeletePath(projectRoot, originalText);
+  if (!targetPath) return null;
+  const relativeDisplay = relative(projectRoot, targetPath).replace(/\\/g, "/") || targetPath;
+  if (!existsSync(targetPath)) {
+    return { type: "executed", reply: `文件 ${relativeDisplay} 不存在，无需删除。` };
+  }
+  try {
+    rmSync(targetPath, { force: true });
+    return { type: "executed", reply: `已在项目根目录删除文件 ${relativeDisplay}。` };
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    return { type: "failed", reason: `本地删除失败: ${message.slice(0, 120)}` };
+  }
+}
+
 async function handleMessage(
   entry: InboxEntry,
   doSend: (params: { to: string; text: string; contextToken: string }) => Promise<boolean>,
@@ -480,19 +547,30 @@ async function handleMessage(
 
   // --- Risky-execute: user confirmed, execute directly with tools ---
   if (isRiskExec) {
+    const localDelete = tryExecuteSimpleRiskyDelete(config.projectRoot, forceExecute.originalText, forceExecute.command);
+    if (localDelete) {
+      logLine(config, `RiskyExec local delete shortcut for ${entry.id}: ${forceExecute.command || forceExecute.originalText}`);
+      return localDelete;
+    }
+
     const prompt = buildRiskyExecutePrompt(forceExecute.originalText, forceExecute.command);
     const label = `RiskyExec ${entry.id}`;
     logLine(config, `RiskyExec calling claude for ${entry.id}`);
 
     let result = callClaude(prompt, config.projectRoot, true, label, config);
-
-    if (!result.stdout.trim() && result.exitCode === 0) {
-      logLine(config, `${label} empty stdout (exit=0), retrying after 2s`);
-      await Bun.sleep(2000);
+    let action = parseActionJson(result.stdout);
+    const retryReason = !action ? getRiskyExecRetryReason(result) : null;
+    if (retryReason) {
+      const retryDelayMs = retryReason === "timeout" ? 3000 : 2000;
+      const retryNote = retryReason === "timeout"
+        ? `${label} timeout detected, retrying once after ${Math.round(retryDelayMs / 1000)}s`
+        : `${label} empty stdout (exit=0), retrying after ${Math.round(retryDelayMs / 1000)}s`;
+      logLine(config, retryNote);
+      await Bun.sleep(retryDelayMs);
       result = callClaude(prompt, config.projectRoot, true, `${label} retry`, config);
+      action = parseActionJson(result.stdout);
     }
 
-    const action = parseActionJson(result.stdout);
     if (action) {
       logLine(config, `RiskyExec parsed: action=${action.type}, reply=${(action as any).reply?.slice(0, 50) || 'N/A'}`);
       return action;
@@ -653,7 +731,6 @@ async function finalizeAction(
   config: AutoReplyConfig,
   entry: InboxEntry,
   action: ActionResult,
-  markInboxRead: (ids: string[]) => number,
   wrappedSendText: (params: { to: string; text: string; contextToken: string }) => Promise<boolean>,
 ): Promise<void> {
   const state = loadState(config.statePath);
@@ -665,7 +742,7 @@ async function finalizeAction(
     const sent = await wrappedSendText({ to: entry.fromUserId, text: clipped, contextToken: entry.contextToken || "" });
     if (sent) {
       advanceState(config, entry.id, "replied", failCount);
-      safeMarkInboxRead(markInboxRead, [entry.id], config);
+      await safeMarkInboxRead([entry.id], config);
       logLine(config, `Sent ${action.type}: "${clipped.slice(0, 80)}"`);
     }
     return;
@@ -675,9 +752,10 @@ async function finalizeAction(
     const askMsg = `⚠️ ${action.warning}\n\n回复"是"确认执行，回复"不"取消。`;
     await wrappedSendText({ to: entry.fromUserId, text: askMsg, contextToken: entry.contextToken || "" });
     logLine(config, `Risk warn sent: "${action.warning.slice(0, 80)}"`);
-    // Don't mark inbox-read — keep pending for user confirmation
+    advanceState(config, entry.id, "replied", failCount, action);
+    await safeMarkInboxRead([entry.id], config);
     saveState(config.statePath, {
-      ...state,
+      ...loadState(config.statePath),
       pendingConfirmation: {
         chatId: entry.fromUserId,
         contextToken: entry.contextToken || "",
@@ -707,11 +785,11 @@ async function finalizeAction(
   const sent = await wrappedSendText({ to: entry.fromUserId, text: fallback, contextToken: entry.contextToken || "" });
   if (sent) {
     advanceState(config, entry.id, "replied", newFailCount);
-    safeMarkInboxRead(markInboxRead, [entry.id], config);
+    await safeMarkInboxRead([entry.id], config);
   } else {
     // Can't even send fallback → dead letter
     advanceState(config, entry.id, "dead", newFailCount);
-    safeMarkInboxRead(markInboxRead, [entry.id], config);
+    await safeMarkInboxRead([entry.id], config);
     logLine(config, `Moving to dead-letter (send failed): ${entry.id}`);
     const newDead = [...(state.deadLetterIds || []), entry.id].slice(-200);
     saveState(config.statePath, { ...state, deadLetterIds: newDead });
@@ -801,7 +879,6 @@ async function processUnreadMessages(config: AutoReplyConfig): Promise<number> {
   const account = loadAccount(stateDir);
 
   let listInboxEntries: (opts?: { unreadOnly?: boolean; limit?: number }) => InboxEntry[];
-  let markInboxRead: (ids: string[]) => number;
   let sendText: any;
   let sendMediaFile: any;
   let CDN_BASE_URL: string;
@@ -811,7 +888,6 @@ async function processUnreadMessages(config: AutoReplyConfig): Promise<number> {
     try {
       const mods = await importWeixinModules(pluginRoot);
       listInboxEntries = mods.listInboxEntries;
-      markInboxRead = mods.markInboxRead;
       sendText = mods.sendText;
       sendMediaFile = mods.sendMediaFile;
       CDN_BASE_URL = mods.CDN_BASE_URL;
@@ -845,7 +921,7 @@ async function processUnreadMessages(config: AutoReplyConfig): Promise<number> {
       const sent = await wrappedSendText({ to: entry.fromUserId, text: clipped, contextToken: entry.contextToken || "" });
       if (sent) {
         advanceState(config, entry.id, "replied", lifecycle.failCount);
-        safeMarkInboxRead(markInboxRead, [entry.id], config);
+        await safeMarkInboxRead([entry.id], config);
         logLine(config, `Recovery sent cached: ${entry.id}`);
       }
       continue;
@@ -853,7 +929,7 @@ async function processUnreadMessages(config: AutoReplyConfig): Promise<number> {
     // Otherwise re-process from scratch
     advanceState(config, entry.id, "classifying", lifecycle.failCount);
     const action = await handleMessage(entry, wrappedSendText, config);
-    await finalizeAction(config, entry, action, markInboxRead, wrappedSendText);
+    await finalizeAction(config, entry, action, wrappedSendText);
   }
 
   let unreadEntries: InboxEntry[] = [];
@@ -898,6 +974,12 @@ async function processUnreadMessages(config: AutoReplyConfig): Promise<number> {
 
     // --- BRANCH A: Reply to a pending risky-confirmation ---
     if (pc && entry.fromUserId === pc.chatId) {
+      if (entry.id === pc.inboxId) {
+        logLine(config, `Ignoring original risky message while pending confirmation: ${entry.id}`);
+        await safeMarkInboxRead([entry.id], config);
+        continue;
+      }
+
       if (isConfirmReply(entry.text)) {
         logLine(config, `Risk confirm YES for "${pc.pendingAction.slice(0, 60)}"`);
 
@@ -915,8 +997,8 @@ async function processUnreadMessages(config: AutoReplyConfig): Promise<number> {
         }
 
         advanceState(config, entry.id, "replied");
-        safeMarkInboxRead(markInboxRead, [entry.id], config);
-        saveState(config.statePath, { ...currentState, pendingConfirmation: undefined });
+        await safeMarkInboxRead([entry.id], config);
+        saveState(config.statePath, { ...loadState(config.statePath), pendingConfirmation: undefined });
         replied++;
         continue;
       }
@@ -924,8 +1006,8 @@ async function processUnreadMessages(config: AutoReplyConfig): Promise<number> {
       if (isDenyReply(entry.text)) {
         await wrappedSendText({ to: entry.fromUserId, text: "好的，已取消。", contextToken: entry.contextToken || "" });
         advanceState(config, entry.id, "replied");
-        safeMarkInboxRead(markInboxRead, [entry.id], config);
-        saveState(config.statePath, { ...currentState, pendingConfirmation: undefined });
+        await safeMarkInboxRead([entry.id], config);
+        saveState(config.statePath, { ...loadState(config.statePath), pendingConfirmation: undefined });
         replied++;
         logLine(config, `Risk deny for "${pc.pendingAction.slice(0, 60)}"`);
         continue;
@@ -958,7 +1040,7 @@ async function processUnreadMessages(config: AutoReplyConfig): Promise<number> {
       advanceState(config, entry.id, "classified", 0, action);
     }
 
-    await finalizeAction(config, entry, action, markInboxRead, wrappedSendText);
+    await finalizeAction(config, entry, action, wrappedSendText);
     replied++;
     break; // ONE reply per poll cycle
   }
