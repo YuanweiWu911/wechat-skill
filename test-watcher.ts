@@ -543,6 +543,34 @@ function push(results: TestResult[], name: string, status: TestStatus, detail: s
   results.push({ name, status, detail });
 }
 
+function sleepMs(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function processExists(pid: number): boolean {
+  if (!Number.isFinite(pid) || pid <= 0) return false;
+  const tasklist = runCommand("tasklist", ["/FI", `PID eq ${pid}`], { timeout: 15000 });
+  return tasklist.status === 0 && tasklist.stdout.includes(String(pid));
+}
+
+function waitUntil(timeoutMs: number, check: () => boolean): boolean {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (check()) {
+      return true;
+    }
+    sleepMs(250);
+  }
+  return check();
+}
+
+function readRegisteredRunnerPid(pidPath: string): number | null {
+  if (!existsSync(pidPath)) return null;
+  const raw = readFileSync(pidPath, "utf-8").trim();
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
 function runEnvTests(): TestResult[] {
   const results: TestResult[] = [];
   const claude = runCommand("claude", ["--version"], { timeout: 15000 });
@@ -1399,6 +1427,8 @@ function runRiskTests(): TestResult[] {
 function runWatcherTests(): TestResult[] {
   const results: TestResult[] = [];
   const pidPath = join(projectRoot, ".claude", "wechat-auto.pid");
+  const startScript = join(hooksDir, "start-wechat-auto.ps1");
+  const stopScript = join(hooksDir, "stop-wechat-auto.ps1");
   if (existsSync(pidPath)) {
     const pid = readFileSync(pidPath, "utf-8").trim();
     const pidCheck = runCommand("tasklist", ["/FI", `PID eq ${pid}`], { timeout: 15000 });
@@ -1414,7 +1444,7 @@ function runWatcherTests(): TestResult[] {
 
   const stopWatcher = runCommand(
     "powershell",
-    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", join(hooksDir, "stop-wechat-auto.ps1")],
+    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", stopScript],
     { timeout: 30000 },
   );
   push(
@@ -1422,6 +1452,64 @@ function runWatcherTests(): TestResult[] {
     "stop-wechat-auto.ps1",
     stopWatcher.status === 0 ? "PASS" : "FAIL",
     stopWatcher.stdout || stopWatcher.stderr || stopWatcher.error || "无输出",
+  );
+
+  const startForPidStop = runCommand(
+    "powershell",
+    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", startScript],
+    { timeout: 30000 },
+  );
+  const pidStopReady = waitUntil(15000, () => {
+    const pid = readRegisteredRunnerPid(pidPath);
+    return pid !== null && processExists(pid);
+  });
+  const registeredPid = readRegisteredRunnerPid(pidPath);
+  const stopWithPid = runCommand(
+    "powershell",
+    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", stopScript],
+    { timeout: 30000 },
+  );
+  const pidRemoved = waitUntil(5000, () => !existsSync(pidPath));
+  const runnerStopped = registeredPid === null ? false : waitUntil(8000, () => !processExists(registeredPid));
+  push(
+    results,
+    "stop-wechat-auto.ps1 stops registered runner from pid file",
+    startForPidStop.status === 0 && pidStopReady && registeredPid !== null && stopWithPid.status === 0 && pidRemoved && runnerStopped ? "PASS" : "FAIL",
+    `start=${startForPidStop.status} ready=${pidStopReady} pid=${registeredPid ?? "null"} stop=${stopWithPid.status} pidRemoved=${pidRemoved} runnerStopped=${runnerStopped} output=${(stopWithPid.stdout || stopWithPid.stderr || stopWithPid.error || "无输出").slice(0, 160)}`,
+  );
+
+  const startForFallback = runCommand(
+    "powershell",
+    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", startScript],
+    { timeout: 30000 },
+  );
+  const fallbackReady = waitUntil(15000, () => {
+    const pid = readRegisteredRunnerPid(pidPath);
+    return pid !== null && processExists(pid);
+  });
+  const fallbackPid = readRegisteredRunnerPid(pidPath);
+  if (existsSync(pidPath)) {
+    rmSync(pidPath, { force: true });
+  }
+  const stopWithoutPid = runCommand(
+    "powershell",
+    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", stopScript],
+    { timeout: 30000 },
+  );
+  const fallbackStopped = fallbackPid === null ? false : waitUntil(8000, () => !processExists(fallbackPid));
+  const fallbackPidRemoved = waitUntil(5000, () => !existsSync(pidPath));
+  push(
+    results,
+    "stop-wechat-auto.ps1 cleans project runner when pid file is missing",
+    startForFallback.status === 0 &&
+      fallbackReady &&
+      fallbackPid !== null &&
+      stopWithoutPid.status === 0 &&
+      fallbackStopped &&
+      fallbackPidRemoved
+      ? "PASS"
+      : "FAIL",
+    `start=${startForFallback.status} ready=${fallbackReady} pid=${fallbackPid ?? "null"} stop=${stopWithoutPid.status} fallbackStopped=${fallbackStopped} pidRemoved=${fallbackPidRemoved} output=${(stopWithoutPid.stdout || stopWithoutPid.stderr || stopWithoutPid.error || "无输出").slice(0, 160)}`,
   );
 
   const bunPath = resolveBunPath();
