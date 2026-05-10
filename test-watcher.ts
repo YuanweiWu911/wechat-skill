@@ -1620,6 +1620,31 @@ function runWatcherTests(): TestResult[] {
     `status=${collectStopConflict.status} stdout=${collectStopConflict.stdout || "无输出"} stderr=${collectStopConflict.stderr || "无输出"} error=${collectStopConflict.error || "无"}`,
   );
 
+  const collectStopExtraArg = runCollectWechat(["--stop", "foo"]);
+  push(
+    results,
+    "collect-wechat.ps1 --stop rejects extra arguments",
+    collectStopExtraArg.status !== 0 &&
+      /参数冲突：--stop 必须单独使用。/.test(
+        [collectStopExtraArg.stdout, collectStopExtraArg.stderr, collectStopExtraArg.error].join("\n"),
+      )
+      ? "PASS"
+      : "FAIL",
+    `status=${collectStopExtraArg.status} stdout=${collectStopExtraArg.stdout || "无输出"} stderr=${collectStopExtraArg.stderr || "无输出"} error=${collectStopExtraArg.error || "无"}`,
+  );
+
+  const collectSyncDefault = runCollectWechat([]);
+  push(
+    results,
+    "collect-wechat.ps1 default mode still imports inbox",
+    collectSyncDefault.status === 0 &&
+      collectSyncDefault.stdout.includes("WeChat Skill 2.0 sync") &&
+      collectSyncDefault.stdout.includes("Imported messages:")
+      ? "PASS"
+      : "FAIL",
+    `status=${collectSyncDefault.status} stdout=${collectSyncDefault.stdout || "无输出"} stderr=${collectSyncDefault.stderr || "无输出"} error=${collectSyncDefault.error || "无"}`,
+  );
+
   const bunPath = resolveBunPath();
   if (!bunPath) {
     push(results, "resolved bun path", "FAIL", "无法定位 bun 可执行文件");

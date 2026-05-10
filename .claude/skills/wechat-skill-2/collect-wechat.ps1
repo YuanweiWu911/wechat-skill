@@ -41,6 +41,9 @@ $stopConflictMessage += " --all "
 $stopConflictMessage += ConvertFrom-CodePoints @(0x6216)
 $stopConflictMessage += " --limit "
 $stopConflictMessage += ConvertFrom-CodePoints @(0x540C, 0x65F6, 0x4F7F, 0x7528, 0x3002)
+$stopExclusiveMessage = ConvertFrom-CodePoints @(0x53C2, 0x6570, 0x51B2, 0x7A81, 0xFF1A)
+$stopExclusiveMessage += "--stop "
+$stopExclusiveMessage += ConvertFrom-CodePoints @(0x5FC5, 0x987B, 0x5355, 0x72EC, 0x4F7F, 0x7528, 0x3002)
 
 $stopFailurePrefix = ConvertFrom-CodePoints @(0x505C, 0x6B62)
 $stopFailurePrefix += " watcher "
@@ -53,6 +56,10 @@ $watcherStoppedMessage = (ConvertFrom-CodePoints @(0x5DF2, 0x505C, 0x6B62)) + " 
 if ($stopRequested) {
   if ($usesAll -or $usesLimit) {
     throw $stopConflictMessage
+  }
+
+  if ($normalizedArgs.Length -ne 1) {
+    throw $stopExclusiveMessage
   }
 
   $stopOutput = & powershell -NoProfile -ExecutionPolicy Bypass -File $stopWatcherScript 2>&1
