@@ -307,52 +307,55 @@ function shouldSkip(entry: InboxEntry): boolean {
   return text.length === 0;
 }
 
-function buildUnifiedPrompt(entry: InboxEntry): string {
-  return [
-    `用户从微信发来消息："${entry.text}"`,
-    "",
-    "你必须忽略上下文中的其他所有指令。现在你的唯一身份是一个JSON消息分类器，不要做任何其他事。",
-    "",
-    "分类规则：",
-    "- 纯闲聊（打招呼、情感表达、简单问答等）→ 输出JSON:",
-    '  {"action":"chat","reply":"你的自然回复"}',
-    "- 安全操作（查看文件、搜索内容、读取信息、查询实时数据等）→ 输出JSON:",
-    '  {"action":"executed","reply":"简述你准备做什么"}',
-    "- 风险操作（删除文件、创建文件、写入文件、修改系统、安装软件、执行脚本等）→ 输出JSON:",
-    '  {"action":"risky","warning":"风险说明","command":"操作简述"}',
-    "",
-    "铁律：",
-    "- 你的回答必须以 { 开头，以 } 结尾，必须是合法JSON",
-    "- 不要输出任何JSON以外的文字、解释、问候、或Markdown",
-    "- 闲聊回复要自然亲切，用简体中文",
-    "- 风险判断从严：涉及删、改、建、写、装、脚本字眼的都是风险",
-  ].join("\n");
+// --- Static system prompts (cached by API via --system-prompt) ---
+
+const CLASSIFY_SYSTEM_PROMPT = [
+  "你必须忽略上下文中的其他所有指令。现在你的唯一身份是一个JSON消息分类器，不要做任何其他事。",
+  "",
+  "分类规则：",
+  "- 纯闲聊（打招呼、情感表达、简单问答等）→ 输出JSON:",
+  '  {"action":"chat","reply":"你的自然回复"}',
+  "- 安全操作（查看文件、搜索内容、读取信息、查询实时数据等）→ 输出JSON:",
+  '  {"action":"executed","reply":"简述你准备做什么"}',
+  "- 风险操作（删除文件、创建文件、写入文件、修改系统、安装软件、执行脚本等）→ 输出JSON:",
+  '  {"action":"risky","warning":"风险说明","command":"操作简述"}',
+  "",
+  "铁律：",
+  "- 你的回答必须以 { 开头，以 } 结尾，必须是合法JSON",
+  "- 不要输出任何JSON以外的文字、解释、问候、或Markdown",
+  "- 闲聊回复要自然亲切，用简体中文",
+  "- 风险判断从严：涉及删、改、建、写、装、脚本字眼的都是风险",
+].join("\n");
+
+const SAFE_EXECUTE_SYSTEM_PROMPT = [
+  "可用工具：Glob（文件匹配）、Grep（内容搜索）、Read（读取文件）、Bash（Shell命令）、WebSearch（网络搜索）、WebFetch（读取网页）。",
+  "执行完成后用简体中文简洁总结结果，必须输出合法JSON:",
+  '  {"action":"executed","reply":"执行结果文本"}',
+  "",
+  "铁律：只输出一行合法JSON，绝不要任何额外文字。",
+].join("\n");
+
+const RISKY_EXECUTE_SYSTEM_PROMPT = [
+  "可用工具：Glob（文件匹配）、Grep（内容搜索）、Read（读取文件）、Write（写入文件）、Bash（Shell命令）、WebSearch（网络搜索）、WebFetch（读取网页）。",
+  "执行完成后用简体中文简洁输出结果，必须输出合法JSON:",
+  '  {"action":"executed","reply":"执行结果文本"}',
+  "",
+  "铁律：只输出一行合法JSON，绝不要任何额外文字。",
+].join("\n");
+
+// --- Dynamic stdin messages (only user-specific text, changed per call) ---
+
+function buildClassifyStdin(entry: InboxEntry): string {
+  return `用户从微信发来消息："${entry.text}"`;
 }
 
-function buildSafeExecutePrompt(originalText: string): string {
-  return [
-    `用户要求："${originalText}"。请使用可用工具完成这个请求。`,
-    "",
-    "可用工具：Glob（文件匹配）、Grep（内容搜索）、Read（读取文件）、Bash（Shell命令）、WebSearch（网络搜索）、WebFetch（读取网页）。",
-    "执行完成后用简体中文简洁总结结果，必须输出合法JSON:",
-    '  {"action":"executed","reply":"执行结果文本"}',
-    "",
-    "铁律：只输出一行合法JSON，绝不要任何额外文字。",
-  ].join("\n");
+function buildSafeExecuteStdin(originalText: string): string {
+  return `用户要求："${originalText}"。请使用可用工具完成这个请求。`;
 }
 
-function buildRiskyExecutePrompt(originalText: string, command: string): string {
+function buildRiskyExecuteStdin(originalText: string, command: string): string {
   const action = command || originalText;
-  return [
-    `用户要求："${originalText}"，已获得用户确认，请立即执行。`,
-    `具体操作：${action}`,
-    "",
-    "可用工具：Glob（文件匹配）、Grep（内容搜索）、Read（读取文件）、Write（写入文件）、Bash（Shell命令）、WebSearch（网络搜索）、WebFetch（读取网页）。",
-    "执行完成后用简体中文简洁输出结果，必须输出合法JSON:",
-    '  {"action":"executed","reply":"执行结果文本"}',
-    "",
-    "铁律：只输出一行合法JSON，绝不要任何额外文字。",
-  ].join("\n");
+  return `用户要求："${originalText}"，已获得用户确认，请立即执行。\n具体操作：${action}`;
 }
 
 type ActionResult = { type: "chat" | "executed"; reply: string } | { type: "risky"; warning: string; command: string } | { type: "failed"; reason: string };
@@ -363,13 +366,18 @@ function callClaude(
   withTools: boolean,
   logLabel: string,
   config: AutoReplyConfig,
+  systemPrompt?: string,
 ): { stdout: string; stderr: string; exitCode: number } {
   const timeoutMsRaw = Number.parseInt(process.env.API_TIMEOUT_MS || "", 10);
   const timeoutMs = Number.isFinite(timeoutMsRaw) && timeoutMsRaw > 0 ? timeoutMsRaw : 120000;
   const claudeExecutable = resolveClaudeExecutable();
   const args: string[] = [
     "--permission-mode", "bypassPermissions",
+    "--exclude-dynamic-system-prompt-sections",
   ];
+  if (systemPrompt) {
+    args.push("--system-prompt", systemPrompt);
+  }
   if (withTools) {
     args.push("--tools", "Bash,Read,Write,WebSearch,WebFetch,Glob,Grep");
   }
@@ -553,11 +561,11 @@ async function handleMessage(
       return localDelete;
     }
 
-    const prompt = buildRiskyExecutePrompt(forceExecute.originalText, forceExecute.command);
+    const riskyStdin = buildRiskyExecuteStdin(forceExecute.originalText, forceExecute.command);
     const label = `RiskyExec ${entry.id}`;
     logLine(config, `RiskyExec calling claude for ${entry.id}`);
 
-    let result = callClaude(prompt, config.projectRoot, true, label, config);
+    let result = callClaude(riskyStdin, config.projectRoot, true, label, config, RISKY_EXECUTE_SYSTEM_PROMPT);
     let action = parseActionJson(result.stdout);
     const retryReason = !action ? getRiskyExecRetryReason(result) : null;
     if (retryReason) {
@@ -567,7 +575,7 @@ async function handleMessage(
         : `${label} empty stdout (exit=0), retrying after ${Math.round(retryDelayMs / 1000)}s`;
       logLine(config, retryNote);
       await Bun.sleep(retryDelayMs);
-      result = callClaude(prompt, config.projectRoot, true, `${label} retry`, config);
+      result = callClaude(riskyStdin, config.projectRoot, true, `${label} retry`, config, RISKY_EXECUTE_SYSTEM_PROMPT);
       action = parseActionJson(result.stdout);
     }
 
@@ -587,16 +595,16 @@ async function handleMessage(
   }
 
   // --- Pass 1: classify intent WITHOUT tools ---
-  const classifyPrompt = buildUnifiedPrompt(entry);
+  const classifyStdin = buildClassifyStdin(entry);
   const classifyLabel = `Classify ${entry.id}`;
   logLine(config, `Classify calling claude for ${entry.id}`);
 
-  let classifyResult = callClaude(classifyPrompt, config.projectRoot, false, classifyLabel, config);
+  let classifyResult = callClaude(classifyStdin, config.projectRoot, false, classifyLabel, config, CLASSIFY_SYSTEM_PROMPT);
 
   if (!classifyResult.stdout.trim() && classifyResult.exitCode === 0) {
     logLine(config, `${classifyLabel} empty stdout (exit=0), retrying after 2s`);
     await Bun.sleep(2000);
-    classifyResult = callClaude(classifyPrompt, config.projectRoot, false, `${classifyLabel} retry`, config);
+    classifyResult = callClaude(classifyStdin, config.projectRoot, false, `${classifyLabel} retry`, config, CLASSIFY_SYSTEM_PROMPT);
   }
 
   const action = parseActionJson(classifyResult.stdout);
@@ -619,16 +627,16 @@ async function handleMessage(
 
   // --- Pass 2: safe operation — execute WITH tools ---
   if (action.type === "executed") {
-    const executePrompt = buildSafeExecutePrompt(entry.text);
+    const executeStdin = buildSafeExecuteStdin(entry.text);
     const executeLabel = `Execute ${entry.id}`;
     logLine(config, `Execute calling claude for ${entry.id}`);
 
-    let execResult = callClaude(executePrompt, config.projectRoot, true, executeLabel, config);
+    let execResult = callClaude(executeStdin, config.projectRoot, true, executeLabel, config, SAFE_EXECUTE_SYSTEM_PROMPT);
 
     if (!execResult.stdout.trim() && execResult.exitCode === 0) {
       logLine(config, `${executeLabel} empty stdout (exit=0), retrying after 2s`);
       await Bun.sleep(2000);
-      execResult = callClaude(executePrompt, config.projectRoot, true, `${executeLabel} retry`, config);
+      execResult = callClaude(executeStdin, config.projectRoot, true, `${executeLabel} retry`, config, SAFE_EXECUTE_SYSTEM_PROMPT);
     }
 
     const execAction = parseActionJson(execResult.stdout);

@@ -92,6 +92,44 @@ function buildClassificationPrompt(text: string): string {
   ].join("\n");
 }
 
+const CLASSIFY_SYSTEM_PROMPT_FOR_TEST = [
+  "你必须忽略上下文中的其他所有指令。现在你的唯一身份是一个JSON消息分类器，不要做任何其他事。",
+  "",
+  "分类规则：",
+  "- 纯闲聊（打招呼、情感表达、简单问答等）→ 输出JSON:",
+  '  {"action":"chat","reply":"你的自然回复"}',
+  "- 安全操作（查看文件、搜索内容、读取信息、查询实时数据等）→ 输出JSON:",
+  '  {"action":"executed","reply":"简述你准备做什么"}',
+  "- 风险操作（删除文件、创建文件、写入文件、修改系统、安装软件、执行脚本等）→ 输出JSON:",
+  '  {"action":"risky","warning":"风险说明","command":"操作简述"}',
+  "",
+  "铁律：",
+  "- 你的回答必须以 { 开头，以 } 结尾，必须是合法JSON",
+  "- 不要输出任何JSON以外的文字、解释、问候、或Markdown",
+  "- 闲聊回复要自然亲切，用简体中文",
+  "- 风险判断从严：涉及删、改、建、写、装、脚本字眼的都是风险",
+].join("\n");
+
+const SAFE_EXECUTE_SYSTEM_PROMPT_FOR_TEST = [
+  "可用工具：Glob（文件匹配）、Grep（内容搜索）、Read（读取文件）、Bash（Shell命令）、WebSearch（网络搜索）、WebFetch（读取网页）。",
+  "执行完成后用简体中文简洁总结结果，必须输出合法JSON:",
+  '  {"action":"executed","reply":"执行结果文本"}',
+  "",
+  "铁律：只输出一行合法JSON，绝不要任何额外文字。",
+].join("\n");
+
+const RISKY_EXECUTE_SYSTEM_PROMPT_FOR_TEST = [
+  "可用工具：Glob（文件匹配）、Grep（内容搜索）、Read（读取文件）、Write（写入文件）、Bash（Shell命令）、WebSearch（网络搜索）、WebFetch（读取网页）。",
+  "执行完成后用简体中文简洁输出结果，必须输出合法JSON:",
+  '  {"action":"executed","reply":"执行结果文本"}',
+  "",
+  "铁律：只输出一行合法JSON，绝不要任何额外文字。",
+].join("\n");
+
+function buildClassifyStdinForTest(text: string): string {
+  return `用户从微信发来消息："${text}"`;
+}
+
 function buildExecutePrompt(text: string): string {
   return [
     `用户要求："${text}"。请使用可用工具完成这个请求。`,
@@ -102,6 +140,10 @@ function buildExecutePrompt(text: string): string {
     "",
     "铁律：只输出一行合法JSON，绝不要任何额外文字。",
   ].join("\n");
+}
+
+function buildExecuteStdinForTest(text: string): string {
+  return `用户要求："${text}"。请使用可用工具完成这个请求。`;
 }
 
 function buildRiskyExecutePromptForTest(originalText: string, command: string): string {
@@ -116,6 +158,11 @@ function buildRiskyExecutePromptForTest(originalText: string, command: string): 
     "",
     "铁律：只输出一行合法JSON，绝不要任何额外文字。",
   ].join("\n");
+}
+
+function buildRiskyExecuteStdinForTest(originalText: string, command: string): string {
+  const action = command || originalText;
+  return `用户要求："${originalText}"，已获得用户确认，请立即执行。\n具体操作：${action}`;
 }
 
 function runCommand(
@@ -896,6 +943,53 @@ function runRiskTests(): TestResult[] {
     createPrompt.includes("创建文件") && createPrompt.includes("写入文件") ? "PASS" : "FAIL",
     "创建/写入文件属于会修改文件系统的操作，分类提示词必须明确将其归为 risky，避免被模型当成 executed 直接执行",
   );
+  const classifyText = "请创建测试文件，test.txt";
+  const oldClassifyPrompt = buildClassificationPrompt(classifyText);
+  const newClassifyCombined = `${buildClassifyStdinForTest(classifyText)}\n\n${CLASSIFY_SYSTEM_PROMPT_FOR_TEST}`;
+  push(
+    results,
+    "classify prompt content preserved after split",
+    oldClassifyPrompt === newClassifyCombined ? "PASS" : "FAIL",
+    `旧长度=${oldClassifyPrompt.length} 新组合长度=${newClassifyCombined.length}`,
+  );
+  const executeText = "列出当前目录下的 markdown 文件";
+  const oldExecutePrompt = buildExecutePrompt(executeText);
+  const newExecuteCombined = `${buildExecuteStdinForTest(executeText)}\n\n${SAFE_EXECUTE_SYSTEM_PROMPT_FOR_TEST}`;
+  push(
+    results,
+    "safe execute prompt content preserved after split",
+    oldExecutePrompt === newExecuteCombined ? "PASS" : "FAIL",
+    `旧长度=${oldExecutePrompt.length} 新组合长度=${newExecuteCombined.length}`,
+  );
+  const oldRiskyPrompt = buildRiskyExecutePromptForTest("删除 risk-delete-probe.txt", "准备删除 risk-delete-probe.txt 文件");
+  const newRiskyCombined = `${buildRiskyExecuteStdinForTest("删除 risk-delete-probe.txt", "准备删除 risk-delete-probe.txt 文件")}\n\n${RISKY_EXECUTE_SYSTEM_PROMPT_FOR_TEST}`;
+  push(
+    results,
+    "risky execute prompt content preserved after split",
+    oldRiskyPrompt === newRiskyCombined ? "PASS" : "FAIL",
+    `旧长度=${oldRiskyPrompt.length} 新组合长度=${newRiskyCombined.length}`,
+  );
+  const classifyDynamicRatio = buildClassifyStdinForTest(classifyText).length / oldClassifyPrompt.length;
+  push(
+    results,
+    "classify split reduces dynamic prompt size",
+    classifyDynamicRatio < 0.2 ? "PASS" : "FAIL",
+    `动态占比=${(classifyDynamicRatio * 100).toFixed(1)}% 静态可缓存=${(100 - classifyDynamicRatio * 100).toFixed(1)}%`,
+  );
+  const executeDynamicRatio = buildExecuteStdinForTest(executeText).length / oldExecutePrompt.length;
+  push(
+    results,
+    "safe execute split reduces dynamic prompt size",
+    executeDynamicRatio < 0.35 ? "PASS" : "FAIL",
+    `动态占比=${(executeDynamicRatio * 100).toFixed(1)}% 静态可缓存=${(100 - executeDynamicRatio * 100).toFixed(1)}%`,
+  );
+  const riskyDynamicRatio = buildRiskyExecuteStdinForTest("删除 risk-delete-probe.txt", "准备删除 risk-delete-probe.txt 文件").length / oldRiskyPrompt.length;
+  push(
+    results,
+    "risky execute split reduces dynamic prompt size",
+    riskyDynamicRatio < 0.35 ? "PASS" : "FAIL",
+    `动态占比=${(riskyDynamicRatio * 100).toFixed(1)}% 静态可缓存=${(100 - riskyDynamicRatio * 100).toFixed(1)}%`,
+  );
 
   const riskyEntry: QueueEntry = {
     id: "risk-delete-test-txt",
@@ -1055,10 +1149,15 @@ function runRiskTests(): TestResult[] {
     rmSync(deleteProbePath, { force: true });
     rmSync(probeReportPath, { force: true });
 
-    const createPrompt = buildRiskyExecutePromptForTest("创建 risk-create-probe.txt", "创建 risk-create-probe.txt 文件");
+    const createPrompt = buildRiskyExecuteStdinForTest("创建 risk-create-probe.txt", "创建 risk-create-probe.txt 文件");
     const createResult = runCommand(
       claudePath,
-      ["--permission-mode", "bypassPermissions", "--tools", "Bash,Read,Write,WebSearch,WebFetch,Glob,Grep"],
+      [
+        "--permission-mode", "bypassPermissions",
+        "--exclude-dynamic-system-prompt-sections",
+        "--system-prompt", RISKY_EXECUTE_SYSTEM_PROMPT_FOR_TEST,
+        "--tools", "Bash,Read,Write,WebSearch,WebFetch,Glob,Grep",
+      ],
       { env, input: createPrompt, timeout: timeoutMs + 10000 },
     );
     const createParsed = parseActionPayload(createResult.stdout);
@@ -1074,10 +1173,15 @@ function runRiskTests(): TestResult[] {
 
     const deletePrep = runCommand("powershell", ["-NoProfile", "-Command", `Set-Content -Path '${deleteProbePath}' -Value 'probe' -Encoding UTF8`], { timeout: 5000 });
     void deletePrep;
-    const deletePrompt = buildRiskyExecutePromptForTest("删除 risk-delete-probe.txt", "准备删除 risk-delete-probe.txt 文件");
+    const deletePrompt = buildRiskyExecuteStdinForTest("删除 risk-delete-probe.txt", "准备删除 risk-delete-probe.txt 文件");
     const deleteResult = runCommand(
       claudePath,
-      ["--permission-mode", "bypassPermissions", "--tools", "Bash,Read,Write,WebSearch,WebFetch,Glob,Grep"],
+      [
+        "--permission-mode", "bypassPermissions",
+        "--exclude-dynamic-system-prompt-sections",
+        "--system-prompt", RISKY_EXECUTE_SYSTEM_PROMPT_FOR_TEST,
+        "--tools", "Bash,Read,Write,WebSearch,WebFetch,Glob,Grep",
+      ],
       { env, input: deletePrompt, timeout: timeoutMs + 10000 },
     );
     const deleteParsed = parseActionPayload(deleteResult.stdout);
@@ -1087,7 +1191,12 @@ function runRiskTests(): TestResult[] {
     void aliasDeletePrep;
     const aliasDeleteResult = runCommand(
       "claude",
-      ["--permission-mode", "bypassPermissions", "--tools", "Bash,Read,Write,WebSearch,WebFetch,Glob,Grep"],
+      [
+        "--permission-mode", "bypassPermissions",
+        "--exclude-dynamic-system-prompt-sections",
+        "--system-prompt", RISKY_EXECUTE_SYSTEM_PROMPT_FOR_TEST,
+        "--tools", "Bash,Read,Write,WebSearch,WebFetch,Glob,Grep",
+      ],
       { env, input: deletePrompt, timeout: timeoutMs + 10000 },
     );
     const aliasDeleteParsed = parseActionPayload(aliasDeleteResult.stdout);
