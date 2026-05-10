@@ -2,7 +2,7 @@
 
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 
@@ -17,8 +17,18 @@ interface InboxEntry {
   attachmentType?: string;
 }
 
+interface MessageLifecycle {
+  status: "classifying" | "classified" | "executing" | "replied" | "dead";
+  failCount: number;
+  lastAttemptAt: string; // ISO timestamp
+  cachedAction?: ActionResult; // preserved across restarts for crash recovery
+}
+
 interface AutoReplyState {
-  processedMessageIds: string[];
+  /** @deprecated replaced by messageStates; kept for migration */
+  processedMessageIds?: string[];
+  /** Per-message lifecycle state machine */
+  messageStates: Record<string, MessageLifecycle>;
   lastStartedAt?: string;
   deadLetterIds: string[];
   pendingConfirmation?: {
@@ -29,6 +39,14 @@ interface AutoReplyState {
     replyText: string;
     inboxId: string;
   };
+}
+
+const CLASSIFY_TTL_MS = 5 * 60 * 1000; // 5 min — if stuck in classifying, assume crash
+const MAX_CLASSIFY_RETRIES = 2; // retries before falling back to chat reply
+
+function fallbackReply(originalText: string): string {
+  const snippet = originalText.length > 30 ? originalText.slice(0, 30) + "..." : originalText;
+  return `收到你的消息："${snippet}"，我稍后回复你。`;
 }
 
 interface PendingReply {
@@ -55,10 +73,10 @@ interface AutoReplyConfig {
   pollMs: number;
 }
 
-const FALLBACK_REPLY = "已收到你的消息，我会尽快继续处理。";
 const DEFAULT_POLL_MS = 8000;
 
 let processing = false;
+let claudeExecutableCache: string | null | undefined;
 
 function parseArgs(): { projectRoot: string; once: boolean } {
   const args = process.argv.slice(2);
@@ -110,6 +128,44 @@ function resolveWeixinPluginRoot(): string {
   return candidates[0];
 }
 
+function resolveClaudeExecutable(): string {
+  if (claudeExecutableCache !== undefined) {
+    return claudeExecutableCache || "claude";
+  }
+
+  const envCandidate = process.env.CLAUDE_BIN?.trim();
+  if (envCandidate && existsSync(envCandidate)) {
+    claudeExecutableCache = envCandidate;
+    return claudeExecutableCache;
+  }
+
+  const whereClaude = spawnSync("where.exe", ["claude"], {
+    encoding: "utf-8",
+    timeout: 15000,
+    env: process.env,
+  });
+  const candidates = (whereClaude.stdout || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  for (const candidate of candidates) {
+    if (candidate.toLowerCase().endsWith(".exe") && existsSync(candidate)) {
+      claudeExecutableCache = candidate;
+      return candidate;
+    }
+
+    const siblingExe = join(dirname(candidate), "claude.exe");
+    if (existsSync(siblingExe)) {
+      claudeExecutableCache = siblingExe;
+      return siblingExe;
+    }
+  }
+
+  claudeExecutableCache = null;
+  return "claude";
+}
+
 function ensureDir(path: string): void {
   if (!existsSync(path)) {
     mkdirSync(path, { recursive: true });
@@ -118,12 +174,36 @@ function ensureDir(path: string): void {
 
 function loadState(statePath: string): AutoReplyState {
   if (!existsSync(statePath)) {
-    return { processedMessageIds: [], deadLetterIds: [] };
+    return { messageStates: {}, deadLetterIds: [] };
   }
   try {
-    return JSON.parse(readFileSync(statePath, "utf-8")) as AutoReplyState;
+    const raw = JSON.parse(readFileSync(statePath, "utf-8")) as Partial<AutoReplyState>;
+
+    // Migration: old processedMessageIds → messageStates
+    if (raw.messageStates === undefined) {
+      raw.messageStates = {};
+    }
+    if (raw.processedMessageIds && raw.processedMessageIds.length > 0) {
+      for (const id of raw.processedMessageIds) {
+        if (!raw.messageStates[id]) {
+          raw.messageStates[id] = {
+            status: "replied",
+            failCount: 0,
+            lastAttemptAt: new Date().toISOString(),
+          };
+        }
+      }
+      delete raw.processedMessageIds;
+    }
+
+    return {
+      messageStates: raw.messageStates,
+      deadLetterIds: raw.deadLetterIds || [],
+      lastStartedAt: raw.lastStartedAt,
+      pendingConfirmation: raw.pendingConfirmation,
+    } as AutoReplyState;
   } catch {
-    return { processedMessageIds: [], deadLetterIds: [] };
+    return { messageStates: {}, deadLetterIds: [] };
   }
 }
 
@@ -212,13 +292,6 @@ function shouldSkip(entry: InboxEntry): boolean {
   return text.length === 0;
 }
 
-interface MessageIntent {
-  action: "chat" | "executed" | "risky";
-  reply?: string;
-  warning?: string;
-  command?: string;
-}
-
 function buildUnifiedPrompt(entry: InboxEntry): string {
   return [
     `用户从微信发来消息："${entry.text}"`,
@@ -276,6 +349,9 @@ function callClaude(
   logLabel: string,
   config: AutoReplyConfig,
 ): { stdout: string; stderr: string; exitCode: number } {
+  const timeoutMsRaw = Number.parseInt(process.env.API_TIMEOUT_MS || "", 10);
+  const timeoutMs = Number.isFinite(timeoutMsRaw) && timeoutMsRaw > 0 ? timeoutMsRaw : 120000;
+  const claudeExecutable = resolveClaudeExecutable();
   const args: string[] = [
     "--permission-mode", "bypassPermissions",
   ];
@@ -288,10 +364,10 @@ function callClaude(
   let exitCode: number;
 
   try {
-    const result = spawnSync("claude", args, {
+    const result = spawnSync(claudeExecutable, args, {
       encoding: "utf-8",
       cwd: projectRoot,
-      timeout: 120000,
+      timeout: timeoutMs,
       input: prompt,
       env: {
         ...process.env,
@@ -302,11 +378,20 @@ function callClaude(
     stderr = (result.stderr || "").trim();
     exitCode = result.status ?? -1;
 
+    if (result.error) {
+      const errorMsg = result.error instanceof Error ? result.error.message : String(result.error);
+      stderr = stderr ? `${stderr}\n${errorMsg}` : errorMsg;
+      if ((result.error as NodeJS.ErrnoException).code === "ETIMEDOUT") {
+        stderr = `claude timed out after ${timeoutMs}ms${stderr ? `\n${stderr}` : ""}`;
+      }
+    }
+
     if (stdout) {
       logLine(config, `${logLabel}: ${stdout.slice(0, 200)}`);
     }
-    if (exitCode !== 0 && stderr) {
-      logLine(config, `${logLabel} stderr (exit=${exitCode}): ${stderr.slice(0, 200)}`);
+    if (exitCode !== 0 || result.signal || result.error) {
+      const stderrPreview = stderr ? stderr.slice(0, 200) : "(empty)";
+      logLine(config, `${logLabel} bin=${claudeExecutable} exit=${exitCode} signal=${result.signal || "none"} stderr=${stderrPreview}`);
     }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -317,42 +402,63 @@ function callClaude(
   return { stdout, stderr, exitCode };
 }
 
+function parseActionCandidate(candidate: unknown): ActionResult | null {
+  if (!candidate || typeof candidate !== "object") {
+    return null;
+  }
+
+  const parsed = candidate as Record<string, unknown>;
+  if (parsed.action === "chat" && typeof parsed.reply === "string") {
+    return { type: "chat", reply: sanitizeReply(parsed.reply) };
+  }
+  if (parsed.action === "executed" && typeof parsed.reply === "string") {
+    return { type: "executed", reply: sanitizeReply(parsed.reply) };
+  }
+  if (parsed.action === "risky" && typeof parsed.warning === "string") {
+    return { type: "risky", warning: parsed.warning, command: typeof parsed.command === "string" ? parsed.command : "" };
+  }
+  if (parsed.type === "result" && typeof parsed.result === "string") {
+    return parseActionJson(parsed.result);
+  }
+
+  return null;
+}
+
 function parseActionJson(stdout: string): ActionResult | null {
   const raw = stdout.trim();
   if (!raw) return null;
 
-  // Try to parse the entire output as action JSON
+  // Try pure JSON first, including Claude's {"type":"result","result":"..."} wrapper.
   try {
-    const parsed = JSON.parse(raw);
-    if (parsed.action === "chat" && parsed.reply) {
-      return { type: "chat", reply: sanitizeReply(parsed.reply) };
-    }
-    if (parsed.action === "executed" && parsed.reply) {
-      return { type: "executed", reply: sanitizeReply(parsed.reply) };
-    }
-    if (parsed.action === "risky" && parsed.warning) {
-      return { type: "risky", warning: parsed.warning, command: parsed.command || "" };
+    const direct = parseActionCandidate(JSON.parse(raw));
+    if (direct) {
+      return direct;
     }
   } catch {
-    // Not pure JSON, try to extract a JSON object
+    // Not pure JSON, continue below.
   }
 
-  // Try to find a JSON object with "action" field
+  const resultWrapperMatch = raw.match(/\{[\s\S]*?"type"\s*:\s*"result"[\s\S]*?\}/);
+  if (resultWrapperMatch) {
+    try {
+      const wrapped = parseActionCandidate(JSON.parse(resultWrapperMatch[0]));
+      if (wrapped) {
+        return wrapped;
+      }
+    } catch {
+      // Regex matched but wrapper JSON was malformed.
+    }
+  }
+
   const jsonMatch = raw.match(/\{[\s\S]*?"action"[\s\S]*?\}/);
   if (jsonMatch) {
     try {
-      const parsed = JSON.parse(jsonMatch[0]);
-      if (parsed.action === "chat" && parsed.reply) {
-        return { type: "chat", reply: sanitizeReply(parsed.reply) };
-      }
-      if (parsed.action === "executed" && parsed.reply) {
-        return { type: "executed", reply: sanitizeReply(parsed.reply) };
-      }
-      if (parsed.action === "risky" && parsed.warning) {
-        return { type: "risky", warning: parsed.warning, command: parsed.command || "" };
+      const extracted = parseActionCandidate(JSON.parse(jsonMatch[0]));
+      if (extracted) {
+        return extracted;
       }
     } catch {
-      // Regex match but not valid JSON
+      // Regex matched but action JSON was malformed.
     }
   }
 
@@ -523,6 +629,168 @@ async function safeSendText(
   return false;
 }
 
+// --- State machine helpers ---
+
+function advanceState(
+  config: AutoReplyConfig,
+  entryId: string,
+  status: MessageLifecycle["status"],
+  failCount?: number,
+  cachedAction?: ActionResult,
+): void {
+  const state = loadState(config.statePath);
+  state.messageStates[entryId] = {
+    status,
+    failCount: failCount ?? 0,
+    lastAttemptAt: new Date().toISOString(),
+    cachedAction,
+  };
+  saveState(config.statePath, state);
+}
+
+/** Finalize a classified message: send reply, or retry, or fallback. */
+async function finalizeAction(
+  config: AutoReplyConfig,
+  entry: InboxEntry,
+  action: ActionResult,
+  markInboxRead: (ids: string[]) => number,
+  wrappedSendText: (params: { to: string; text: string; contextToken: string }) => Promise<boolean>,
+): Promise<void> {
+  const state = loadState(config.statePath);
+  const lifecycle = state.messageStates[entry.id];
+  const failCount = lifecycle?.failCount ?? 0;
+
+  if (action.type === "chat" || action.type === "executed") {
+    const clipped = action.reply.length > 800 ? action.reply.slice(0, 800) + "..." : action.reply;
+    const sent = await wrappedSendText({ to: entry.fromUserId, text: clipped, contextToken: entry.contextToken || "" });
+    if (sent) {
+      advanceState(config, entry.id, "replied", failCount);
+      safeMarkInboxRead(markInboxRead, [entry.id], config);
+      logLine(config, `Sent ${action.type}: "${clipped.slice(0, 80)}"`);
+    }
+    return;
+  }
+
+  if (action.type === "risky") {
+    const askMsg = `⚠️ ${action.warning}\n\n回复"是"确认执行，回复"不"取消。`;
+    await wrappedSendText({ to: entry.fromUserId, text: askMsg, contextToken: entry.contextToken || "" });
+    logLine(config, `Risk warn sent: "${action.warning.slice(0, 80)}"`);
+    // Don't mark inbox-read — keep pending for user confirmation
+    saveState(config.statePath, {
+      ...state,
+      pendingConfirmation: {
+        chatId: entry.fromUserId,
+        contextToken: entry.contextToken || "",
+        pendingAction: entry.text,
+        askedAt: new Date().toISOString(),
+        replyText: action.command,
+        inboxId: entry.id,
+      },
+    });
+    return;
+  }
+
+  // --- Failed: retry or fallback ---
+  const newFailCount = failCount + 1;
+  logLine(config, `Failed (attempt ${newFailCount}/${MAX_CLASSIFY_RETRIES}): ${action.reason}`);
+
+  if (newFailCount <= MAX_CLASSIFY_RETRIES) {
+    // Retry: reset to classifying so next poll picks it up
+    advanceState(config, entry.id, "classifying", newFailCount);
+    logLine(config, `Will retry ${entry.id} on next poll cycle`);
+    return; // Don't mark inbox-read — message stays unread for retry
+  }
+
+  // Exhausted retries → send fallback chat reply
+  const fallback = fallbackReply(entry.text);
+  logLine(config, `Fallback for ${entry.id}: "${fallback.slice(0, 80)}"`);
+  const sent = await wrappedSendText({ to: entry.fromUserId, text: fallback, contextToken: entry.contextToken || "" });
+  if (sent) {
+    advanceState(config, entry.id, "replied", newFailCount);
+    safeMarkInboxRead(markInboxRead, [entry.id], config);
+  } else {
+    // Can't even send fallback → dead letter
+    advanceState(config, entry.id, "dead", newFailCount);
+    safeMarkInboxRead(markInboxRead, [entry.id], config);
+    logLine(config, `Moving to dead-letter (send failed): ${entry.id}`);
+    const newDead = [...(state.deadLetterIds || []), entry.id].slice(-200);
+    saveState(config.statePath, { ...state, deadLetterIds: newDead });
+  }
+}
+
+/** On startup, recover messages stuck in transient states (crash recovery). */
+function recoverStaleStates(config: AutoReplyConfig): InboxEntry[] {
+  const state = loadState(config.statePath);
+  const now = Date.now();
+  const staleIds: string[] = [];
+
+  for (const [id, lifecycle] of Object.entries(state.messageStates)) {
+    if (lifecycle.status === "replied" || lifecycle.status === "dead") continue;
+    const elapsed = now - new Date(lifecycle.lastAttemptAt).getTime();
+    if (elapsed > CLASSIFY_TTL_MS) {
+      staleIds.push(id);
+      logLine(config, `Recover stale: ${id} status=${lifecycle.status} elapsed=${Math.round(elapsed / 1000)}s`);
+    }
+  }
+
+  if (staleIds.length === 0) return [];
+
+  const allEntries = readInboxEntriesSync();
+  return allEntries.filter((e: InboxEntry) => staleIds.includes(e.id));
+}
+
+/** Direct inbox.jsonl reader (synchronous — used for stale recovery during startup). */
+function dedupeInboxEntries(entries: InboxEntry[]): InboxEntry[] {
+  const seen = new Set<string>();
+  const unique: InboxEntry[] = [];
+  for (const entry of entries) {
+    if (seen.has(entry.id)) continue;
+    seen.add(entry.id);
+    unique.push(entry);
+  }
+  return unique;
+}
+
+function readInboxEntriesSync(): InboxEntry[] {
+  const stateDir = resolveWeixinStateDir();
+  const p = join(stateDir, "inbox.jsonl");
+  if (!existsSync(p)) return [];
+  return dedupeInboxEntries(readFileSync(p, "utf-8")
+    .split("\n")
+    .map((line: string) => line.trim())
+    .filter(Boolean)
+    .flatMap((line: string) => {
+      try { return [JSON.parse(line) as InboxEntry]; } catch { return []; }
+    }));
+}
+
+function rankUnreadEntry(entry: InboxEntry, state: AutoReplyState): number {
+  const lifecycle = state.messageStates[entry.id];
+  if (lifecycle && (lifecycle.status === "replied" || lifecycle.status === "dead")) {
+    return 99;
+  }
+
+  const deadLetter = new Set(state.deadLetterIds || []);
+  if (deadLetter.has(entry.id)) {
+    return 99;
+  }
+
+  if (shouldSkip(entry)) {
+    return 99;
+  }
+
+  const pc = state.pendingConfirmation;
+  if (pc && entry.fromUserId === pc.chatId) {
+    return 0;
+  }
+
+  if (!lifecycle) {
+    return 1;
+  }
+
+  return 2;
+}
+
 async function processUnreadMessages(config: AutoReplyConfig): Promise<number> {
   if (processing) return 0;
   processing = true;
@@ -564,12 +832,34 @@ async function processUnreadMessages(config: AutoReplyConfig): Promise<number> {
     safeSendText(sendText, account, getUpdates, config, params, 2);
 
   const state = loadState(config.statePath);
-  const processed = new Set(state.processedMessageIds);
+
+  // --- Stale-state recovery: retry messages stuck by a prior crash ---
+  const staleEntries = recoverStaleStates(config);
+  for (const entry of staleEntries) {
+    const lifecycle = state.messageStates[entry.id];
+    logLine(config, `Recovery retry: ${entry.id} status=${lifecycle.status} fail=${lifecycle.failCount}`);
+    // If we have a cached action (classified before crash), send it directly
+    if (lifecycle.cachedAction && (lifecycle.cachedAction.type === "chat" || lifecycle.cachedAction.type === "executed")) {
+      const a = lifecycle.cachedAction;
+      const clipped = a.reply.length > 800 ? a.reply.slice(0, 800) + "..." : a.reply;
+      const sent = await wrappedSendText({ to: entry.fromUserId, text: clipped, contextToken: entry.contextToken || "" });
+      if (sent) {
+        advanceState(config, entry.id, "replied", lifecycle.failCount);
+        safeMarkInboxRead(markInboxRead, [entry.id], config);
+        logLine(config, `Recovery sent cached: ${entry.id}`);
+      }
+      continue;
+    }
+    // Otherwise re-process from scratch
+    advanceState(config, entry.id, "classifying", lifecycle.failCount);
+    const action = await handleMessage(entry, wrappedSendText, config);
+    await finalizeAction(config, entry, action, markInboxRead, wrappedSendText);
+  }
 
   let unreadEntries: InboxEntry[] = [];
   for (let retry = 0; retry < 3; retry++) {
     try {
-      unreadEntries = listInboxEntries({ unreadOnly: true, limit: 100 }).reverse();
+      unreadEntries = dedupeInboxEntries(listInboxEntries({ unreadOnly: true, limit: 100 }).reverse());
       break;
     } catch (e) {
       if (retry < 2) {
@@ -582,20 +872,29 @@ async function processUnreadMessages(config: AutoReplyConfig): Promise<number> {
     }
   }
   let replied = 0;
+  const prioritizedEntries = unreadEntries
+    .map((entry, index) => ({ entry, index, rank: rankUnreadEntry(entry, state) }))
+    .filter((item) => item.rank < 99)
+    .sort((a, b) => a.rank - b.rank || a.index - b.index)
+    .map((item) => item.entry);
 
-  for (const entry of unreadEntries) {
-    if (processed.has(entry.id) || shouldSkip(entry)) {
+  for (const entry of prioritizedEntries) {
+    const currentState = loadState(config.statePath);
+    const lifecycle = currentState.messageStates[entry.id];
+    const deadLetter = new Set(currentState.deadLetterIds || []);
+    const pc = currentState.pendingConfirmation;
+
+    if (lifecycle && (lifecycle.status === "replied" || lifecycle.status === "dead")) {
       continue;
     }
-
-    const currentState = loadState(config.statePath);
-    const deadLetter = new Set(currentState.deadLetterIds || []);
+    if (shouldSkip(entry)) {
+      continue;
+    }
     if (deadLetter.has(entry.id)) {
       logLine(config, `Skipping dead-letter: ${entry.id}`);
-      processed.add(entry.id);
+      advanceState(config, entry.id, "dead");
       continue;
     }
-    const pc = currentState.pendingConfirmation;
 
     // --- BRANCH A: Reply to a pending risky-confirmation ---
     if (pc && entry.fromUserId === pc.chatId) {
@@ -615,26 +914,18 @@ async function processUnreadMessages(config: AutoReplyConfig): Promise<number> {
           await wrappedSendText({ to: entry.fromUserId, text: `执行失败：${action.reason}`, contextToken: entry.contextToken || "" });
         }
 
-        processed.add(entry.id);
+        advanceState(config, entry.id, "replied");
         safeMarkInboxRead(markInboxRead, [entry.id], config);
-        saveState(config.statePath, {
-          ...currentState,
-          processedMessageIds: Array.from(processed).slice(-1000),
-          pendingConfirmation: undefined,
-        });
+        saveState(config.statePath, { ...currentState, pendingConfirmation: undefined });
         replied++;
         continue;
       }
 
       if (isDenyReply(entry.text)) {
         await wrappedSendText({ to: entry.fromUserId, text: "好的，已取消。", contextToken: entry.contextToken || "" });
-        processed.add(entry.id);
+        advanceState(config, entry.id, "replied");
         safeMarkInboxRead(markInboxRead, [entry.id], config);
-        saveState(config.statePath, {
-          ...currentState,
-          processedMessageIds: Array.from(processed).slice(-1000),
-          pendingConfirmation: undefined,
-        });
+        saveState(config.statePath, { ...currentState, pendingConfirmation: undefined });
         replied++;
         logLine(config, `Risk deny for "${pc.pendingAction.slice(0, 60)}"`);
         continue;
@@ -642,22 +933,17 @@ async function processUnreadMessages(config: AutoReplyConfig): Promise<number> {
 
       // Not a confirm/deny — clear old pending, treat as new message
       logLine(config, `Non-confirm while risky-pending; treating as new request`);
-      saveState(config.statePath, {
-        ...currentState,
-        processedMessageIds: Array.from(processed).slice(-1000),
-        pendingConfirmation: undefined,
-      });
+      saveState(config.statePath, { ...currentState, pendingConfirmation: undefined });
     }
 
-    // --- BRANCH B: New message → analyze intent → act ---
+    // --- BRANCH B: New message → classify (state machine) ---
+    if (lifecycle && lifecycle.status !== "replied" && lifecycle.status !== "dead") {
+      logLine(config, `Retry deferred behind fresh messages: ${entry.id} status=${lifecycle.status} fail=${lifecycle.failCount}`);
+    }
     logLine(config, `Processing: ${entry.id} text="${entry.text.slice(0, 80)}"`);
 
-    processed.add(entry.id);
-    saveState(config.statePath, {
-      ...currentState,
-      processedMessageIds: Array.from(processed).slice(-1000),
-      [`attempting:${entry.id}`]: new Date().toISOString(),
-    } as any);
+    // Mark as classifying BEFORE calling LLM — crash recovery can detect this
+    advanceState(config, entry.id, "classifying");
 
     let action: ActionResult;
     try {
@@ -667,75 +953,19 @@ async function processUnreadMessages(config: AutoReplyConfig): Promise<number> {
       action = { type: "failed", reason: "LLM调用异常" };
     }
 
-    if (action.type === "chat" || action.type === "executed") {
-      const clipped = action.reply.length > 800 ? action.reply.slice(0, 800) + "..." : action.reply;
-      await wrappedSendText({ to: entry.fromUserId, text: clipped, contextToken: entry.contextToken || "" });
-      logLine(config, `Sent ${action.type}: "${clipped.slice(0, 80)}"`);
-      processed.add(entry.id);
-      safeMarkInboxRead(markInboxRead, [entry.id], config);
-      saveState(config.statePath, {
-        ...currentState,
-        processedMessageIds: Array.from(processed).slice(-1000),
-        lastStartedAt: new Date().toISOString(),
-      });
-      replied++;
-      break; // ONE reply per poll cycle
-    } else if (action.type === "risky") {
-      const askMsg = `⚠️ ${action.warning}\n\n回复"是"确认执行，回复"不"取消。`;
-      await wrappedSendText({ to: entry.fromUserId, text: askMsg, contextToken: entry.contextToken || "" });
-      logLine(config, `Risk warn sent: "${action.warning.slice(0, 80)}"`);
-      processed.add(entry.id);
-      // Don't mark as read — keep pending for user confirmation
-      saveState(config.statePath, {
-        ...loadState(config.statePath),
-        processedMessageIds: Array.from(processed).slice(-1000),
-        pendingConfirmation: {
-          chatId: entry.fromUserId,
-          contextToken: entry.contextToken || "",
-          pendingAction: entry.text,
-          askedAt: new Date().toISOString(),
-          replyText: action.command,
-          inboxId: entry.id,
-        },
-      });
-      replied++;
-      continue;
-    } else {
-      if (!action.reason.includes("EPERM")) {
-        const errMsg = `抱歉，处理失败：${action.reason}`;
-        await wrappedSendText({ to: entry.fromUserId, text: errMsg, contextToken: entry.contextToken || "" });
-      }
-      logLine(config, `Failed: ${action.reason}`);
-
-      const crashKey = `crash:${entry.id}`;
-      const crashCount = (currentState as any)[crashKey] || 0;
-      if (crashCount >= 3) {
-        logLine(config, `Moving to dead-letter: ${entry.id}`);
-        const newDead = [...(currentState.deadLetterIds || []), entry.id].slice(-200);
-        saveState(config.statePath, {
-          ...currentState,
-          processedMessageIds: Array.from(processed).slice(-1000),
-          deadLetterIds: newDead,
-          lastStartedAt: new Date().toISOString(),
-        });
-        continue;
-      }
-      saveState(config.statePath, {
-        ...currentState,
-        processedMessageIds: Array.from(processed).slice(-1000),
-        [crashKey]: crashCount + 1,
-        lastStartedAt: new Date().toISOString(),
-      } as any);
-      processed.add(entry.id);
-      safeMarkInboxRead(markInboxRead, [entry.id], config);
-      replied++;
-      break;
+    // Cache successful classification results in the state for crash recovery
+    if (action.type === "chat" || action.type === "executed" || action.type === "risky") {
+      advanceState(config, entry.id, "classified", 0, action);
     }
+
+    await finalizeAction(config, entry, action, markInboxRead, wrappedSendText);
+    replied++;
+    break; // ONE reply per poll cycle
   }
 
   const finalState = loadState(config.statePath);
   saveState(config.statePath, {
-    processedMessageIds: Array.from(processed).slice(-1000),
+    messageStates: finalState.messageStates,
     deadLetterIds: finalState.deadLetterIds || [],
     pendingConfirmation: finalState.pendingConfirmation || undefined,
     lastStartedAt: state.lastStartedAt || new Date().toISOString(),
