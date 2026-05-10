@@ -57,6 +57,12 @@ interface QueueState {
   };
 }
 
+interface FileTransferDecisionForTest {
+  filePath: string;
+  relativeDisplay: string;
+  requiresConfirmation: boolean;
+}
+
 interface PendingConfirmationCase {
   chatId: string;
   inboxId: string;
@@ -458,6 +464,71 @@ function resolveSafeProjectDeletePathForTest(projectRootPath: string, text: stri
     return null;
   }
   return resolved;
+}
+
+const DIRECT_SEND_ALLOWED_EXTENSIONS_FOR_TEST = new Set([
+  ".json",
+  ".md",
+  ".txt",
+  ".yaml",
+  ".yml",
+  ".log",
+  ".ts",
+  ".pdf",
+  ".docx",
+  ".pptx",
+  ".xlsx",
+]);
+
+const DIRECT_SEND_CONFIRM_THRESHOLD_BYTES_FOR_TEST = 10 * 1024 * 1024;
+
+function extractSimpleFileTransferTargetForTest(text: string): string | null {
+  const trimmed = text.trim();
+  const patterns = [
+    /^(?:请)?(?:将|把)\s*([A-Za-z0-9._\-\\/]+?)\s*(?:文件)?发给我$/i,
+    /^(?:请)?发送(?:文件)?\s*([A-Za-z0-9._\-\\/]+?)\s*给我$/i,
+    /^发送文件\s*([A-Za-z0-9._\-\\/]+)$/i,
+  ];
+  for (const pattern of patterns) {
+    const match = trimmed.match(pattern);
+    if (match?.[1]) {
+      return match[1];
+    }
+  }
+  return null;
+}
+
+function resolveSafeProjectTransferFilePathForTest(projectRootPath: string, text: string): string | null {
+  const target = extractSimpleFileTransferTargetForTest(text);
+  if (!target) return null;
+  if (/^[a-zA-Z]:/.test(target) || target.startsWith("/") || target.startsWith("\\")) {
+    return null;
+  }
+  const normalizedTarget = target.replace(/[\\/]+/g, "\\");
+  if (normalizedTarget.split("\\").some((segment) => segment === ".." || segment.length === 0)) {
+    return null;
+  }
+  const resolved = resolve(projectRootPath, normalizedTarget);
+  const normalizedProjectRoot = normalize(projectRootPath).toLowerCase();
+  const normalizedResolved = normalize(resolved).toLowerCase();
+  if (normalizedResolved !== normalizedProjectRoot && !normalizedResolved.startsWith(`${normalizedProjectRoot}\\`)) {
+    return null;
+  }
+  const extension = normalizedResolved.slice(normalizedResolved.lastIndexOf(".")).toLowerCase();
+  if (!DIRECT_SEND_ALLOWED_EXTENSIONS_FOR_TEST.has(extension)) {
+    return null;
+  }
+  return resolved;
+}
+
+function analyzeFileTransferRequestForTest(projectRootPath: string, text: string, sizeBytes: number): FileTransferDecisionForTest | null {
+  const filePath = resolveSafeProjectTransferFilePathForTest(projectRootPath, text);
+  if (!filePath) return null;
+  return {
+    filePath,
+    relativeDisplay: normalize(filePath).slice(normalize(projectRootPath).length + 1).replace(/\\/g, "/"),
+    requiresConfirmation: sizeBytes > DIRECT_SEND_CONFIRM_THRESHOLD_BYTES_FOR_TEST,
+  };
 }
 
 function selectCurrentQueueEntry(unreadEntries: QueueEntry[], state: QueueState): QueueEntry | null {
@@ -1130,6 +1201,39 @@ function runRiskTests(): TestResult[] {
     "resolve simple delete target inside project",
     safeDeletePath === join(projectRoot, "test.txt") ? "PASS" : "FAIL",
     `解析路径=${safeDeletePath || "(null)"}`,
+  );
+  push(
+    results,
+    "extract file transfer target from user wording",
+    extractSimpleFileTransferTargetForTest("将settings.local.json文件发给我") === "settings.local.json" ? "PASS" : "FAIL",
+    `提取结果=${extractSimpleFileTransferTargetForTest("将settings.local.json文件发给我") || "(null)"}`,
+  );
+  const settingsTransferPath = resolveSafeProjectTransferFilePathForTest(projectRoot, "将.claude/settings.local.json文件发给我");
+  push(
+    results,
+    "resolve whitelisted project file for transfer",
+    settingsTransferPath === join(projectRoot, ".claude", "settings.local.json") ? "PASS" : "FAIL",
+    `解析路径=${settingsTransferPath || "(null)"}`,
+  );
+  push(
+    results,
+    "reject non-whitelisted file transfer extension",
+    resolveSafeProjectTransferFilePathForTest(projectRoot, "将secret.exe文件发给我") === null ? "PASS" : "FAIL",
+    "应拒绝发送不在白名单中的扩展名",
+  );
+  const smallTransfer = analyzeFileTransferRequestForTest(projectRoot, "将.claude/settings.local.json文件发给我", 1024);
+  push(
+    results,
+    "small whitelisted file can send directly",
+    !!smallTransfer && !smallTransfer.requiresConfirmation ? "PASS" : "FAIL",
+    smallTransfer ? `relative=${smallTransfer.relativeDisplay} confirm=${smallTransfer.requiresConfirmation}` : "返回 null",
+  );
+  const largeTransfer = analyzeFileTransferRequestForTest(projectRoot, "将.claude/settings.local.json文件发给我", 11 * 1024 * 1024);
+  push(
+    results,
+    "large file transfer requires second confirmation",
+    !!largeTransfer && largeTransfer.requiresConfirmation ? "PASS" : "FAIL",
+    largeTransfer ? `relative=${largeTransfer.relativeDisplay} confirm=${largeTransfer.requiresConfirmation}` : "返回 null",
   );
 
   const claudePath = resolveClaudePath();

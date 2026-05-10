@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, normalize, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -73,7 +73,29 @@ interface AutoReplyConfig {
   pollMs: number;
 }
 
+interface FileTransferDecision {
+  filePath: string;
+  relativeDisplay: string;
+  fileExists: boolean;
+  fileSizeBytes: number;
+  requiresConfirmation: boolean;
+}
+
 const DEFAULT_POLL_MS = 8000;
+const DIRECT_SEND_CONFIRM_THRESHOLD_BYTES = 10 * 1024 * 1024;
+const DIRECT_SEND_ALLOWED_EXTENSIONS = new Set([
+  ".json",
+  ".md",
+  ".txt",
+  ".yaml",
+  ".yml",
+  ".log",
+  ".ts",
+  ".pdf",
+  ".docx",
+  ".pptx",
+  ".xlsx",
+]);
 
 let processing = false;
 let claudeExecutableCache: string | null | undefined;
@@ -358,7 +380,11 @@ function buildRiskyExecuteStdin(originalText: string, command: string): string {
   return `用户要求："${originalText}"，已获得用户确认，请立即执行。\n具体操作：${action}`;
 }
 
-type ActionResult = { type: "chat" | "executed"; reply: string } | { type: "risky"; warning: string; command: string } | { type: "failed"; reason: string };
+type ActionResult =
+  | { type: "chat"; reply: string }
+  | { type: "executed"; reply: string; files?: string[] }
+  | { type: "risky"; warning: string; command: string }
+  | { type: "failed"; reason: string };
 
 function callClaude(
   prompt: string,
@@ -435,7 +461,10 @@ function parseActionCandidate(candidate: unknown): ActionResult | null {
     return { type: "chat", reply: sanitizeReply(parsed.reply) };
   }
   if (parsed.action === "executed" && typeof parsed.reply === "string") {
-    return { type: "executed", reply: sanitizeReply(parsed.reply) };
+    const files = Array.isArray(parsed.files) && parsed.files.every((item) => typeof item === "string")
+      ? parsed.files.filter((item): item is string => typeof item === "string")
+      : undefined;
+    return { type: "executed", reply: sanitizeReply(parsed.reply), files };
   }
   if (parsed.action === "risky" && typeof parsed.warning === "string") {
     return { type: "risky", warning: parsed.warning, command: typeof parsed.command === "string" ? parsed.command : "" };
@@ -503,6 +532,97 @@ function getRiskyExecRetryReason(result: { stdout: string; stderr: string; exitC
   return null;
 }
 
+function formatFileSizeMb(bytes: number): string {
+  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+}
+
+function extractSimpleFileTransferTarget(text: string): string | null {
+  const trimmed = text.trim();
+  const patterns = [
+    /^(?:请)?(?:将|把)\s*([A-Za-z0-9._\-\\/]+?)\s*(?:文件)?发给我$/i,
+    /^(?:请)?发送(?:文件)?\s*([A-Za-z0-9._\-\\/]+?)\s*给我$/i,
+    /^发送文件\s*([A-Za-z0-9._\-\\/]+)$/i,
+  ];
+  for (const pattern of patterns) {
+    const match = trimmed.match(pattern);
+    if (match?.[1]) {
+      return match[1];
+    }
+  }
+  return null;
+}
+
+function resolveSafeProjectTransferFilePath(projectRoot: string, text: string): string | null {
+  const target = extractSimpleFileTransferTarget(text);
+  if (!target) return null;
+  if (/^[a-zA-Z]:/.test(target) || target.startsWith("/") || target.startsWith("\\")) {
+    return null;
+  }
+  const normalizedTarget = target.replace(/[\\/]+/g, "\\");
+  if (normalizedTarget.split("\\").some((segment) => segment === ".." || segment.length === 0)) {
+    return null;
+  }
+  const resolved = resolve(projectRoot, normalizedTarget);
+  const normalizedProjectRoot = normalize(projectRoot).toLowerCase();
+  const normalizedResolved = normalize(resolved).toLowerCase();
+  if (normalizedResolved !== normalizedProjectRoot && !normalizedResolved.startsWith(`${normalizedProjectRoot}\\`)) {
+    return null;
+  }
+  const dotIndex = normalizedResolved.lastIndexOf(".");
+  const extension = dotIndex >= 0 ? normalizedResolved.slice(dotIndex).toLowerCase() : "";
+  if (!DIRECT_SEND_ALLOWED_EXTENSIONS.has(extension)) {
+    return null;
+  }
+  return resolved;
+}
+
+function analyzeDirectFileTransfer(projectRoot: string, text: string): FileTransferDecision | null {
+  const filePath = resolveSafeProjectTransferFilePath(projectRoot, text);
+  if (!filePath) return null;
+  const fileExists = existsSync(filePath);
+  const fileSizeBytes = fileExists ? statSync(filePath).size : 0;
+  return {
+    filePath,
+    relativeDisplay: relative(projectRoot, filePath).replace(/\\/g, "/") || filePath,
+    fileExists,
+    fileSizeBytes,
+    requiresConfirmation: fileExists && fileSizeBytes > DIRECT_SEND_CONFIRM_THRESHOLD_BYTES,
+  };
+}
+
+function tryPrepareSimpleFileTransfer(projectRoot: string, text: string): ActionResult | null {
+  const decision = analyzeDirectFileTransfer(projectRoot, text);
+  if (!decision) return null;
+  if (!decision.fileExists) {
+    return { type: "executed", reply: `文件 ${decision.relativeDisplay} 不存在，无法发送。` };
+  }
+  if (decision.requiresConfirmation) {
+    return {
+      type: "risky",
+      warning: `文件 ${decision.relativeDisplay} 大小约 ${formatFileSizeMb(decision.fileSizeBytes)}，超过 10MB。确认继续发送吗？`,
+      command: `发送文件 ${decision.relativeDisplay}`,
+    };
+  }
+  return {
+    type: "executed",
+    reply: `已将文件 ${decision.relativeDisplay} 发送给你。`,
+    files: [decision.filePath],
+  };
+}
+
+function tryExecuteConfirmedFileTransfer(projectRoot: string, originalText: string, command: string): ActionResult | null {
+  const decision = analyzeDirectFileTransfer(projectRoot, command || originalText) || analyzeDirectFileTransfer(projectRoot, originalText);
+  if (!decision) return null;
+  if (!decision.fileExists) {
+    return { type: "executed", reply: `文件 ${decision.relativeDisplay} 不存在，无法发送。` };
+  }
+  return {
+    type: "executed",
+    reply: `已将文件 ${decision.relativeDisplay} 发送给你。`,
+    files: [decision.filePath],
+  };
+}
+
 function extractSimpleDeleteTarget(text: string): string | null {
   const trimmed = text.trim();
   const match = trimmed.match(/^(?:请)?(?:准备)?删除(?:文件)?\s*([A-Za-z0-9._\-\\/]+?)(?:\s*文件)?$/i);
@@ -555,6 +675,11 @@ async function handleMessage(
 
   // --- Risky-execute: user confirmed, execute directly with tools ---
   if (isRiskExec) {
+    const localFileTransfer = tryExecuteConfirmedFileTransfer(config.projectRoot, forceExecute.originalText, forceExecute.command);
+    if (localFileTransfer) {
+      logLine(config, `RiskyExec local file transfer shortcut for ${entry.id}: ${forceExecute.command || forceExecute.originalText}`);
+      return localFileTransfer;
+    }
     const localDelete = tryExecuteSimpleRiskyDelete(config.projectRoot, forceExecute.originalText, forceExecute.command);
     if (localDelete) {
       logLine(config, `RiskyExec local delete shortcut for ${entry.id}: ${forceExecute.command || forceExecute.originalText}`);
@@ -592,6 +717,12 @@ async function handleMessage(
       return { type: "failed", reason: `LLM调用失败(exit=${result.exitCode}): ${brief.slice(0, 100)}` };
     }
     return { type: "failed", reason: "无法解析执行结果" };
+  }
+
+  const directFileTransfer = tryPrepareSimpleFileTransfer(config.projectRoot, entry.text);
+  if (directFileTransfer) {
+    logLine(config, `Direct file transfer shortcut for ${entry.id}: ${entry.text}`);
+    return directFileTransfer;
   }
 
   // --- Pass 1: classify intent WITHOUT tools ---
@@ -684,6 +815,15 @@ async function warmupApiSession(
 }
 
 type SendTextFn = (params: { to: string; text: string; baseUrl: string; token: string; contextToken: string }) => Promise<{ messageId: string }>;
+type SendMediaFileFn = (params: {
+  filePath: string;
+  to: string;
+  text: string;
+  baseUrl: string;
+  token: string;
+  contextToken: string;
+  cdnBaseUrl: string;
+}) => Promise<{ messageId: string }>;
 
 async function safeSendText(
   sendText: SendTextFn,
@@ -715,6 +855,64 @@ async function safeSendText(
   return false;
 }
 
+async function safeSendMediaFile(
+  sendMediaFile: SendMediaFileFn,
+  account: AccountData,
+  getUpdates: (baseUrl: string, token: string, getUpdatesBuf: string, signal?: AbortSignal) => Promise<{ ret: number }>,
+  config: AutoReplyConfig,
+  params: { to: string; filePath: string; text: string; contextToken: string; cdnBaseUrl: string },
+  retries: number,
+): Promise<boolean> {
+  for (let i = 0; i <= retries; i++) {
+    try {
+      await sendMediaFile({
+        filePath: params.filePath,
+        to: params.to,
+        text: params.text,
+        baseUrl: account.baseUrl || "https://ilinkai.weixin.qq.com",
+        token: account.token,
+        contextToken: params.contextToken,
+        cdnBaseUrl: params.cdnBaseUrl,
+      });
+      logLine(config, `File sent: ${params.filePath}`);
+      return true;
+    } catch (err) {
+      logLine(config, `Send file attempt ${i + 1} failed: ${err instanceof Error ? err.message : String(err)}`);
+      if (i < retries) {
+        await warmupApiSession(account, getUpdates, config);
+        await Bun.sleep(1000);
+      }
+    }
+  }
+  return false;
+}
+
+async function sendActionReply(
+  action: Extract<ActionResult, { type: "chat" | "executed" }>,
+  to: string,
+  contextToken: string,
+  wrappedSendText: (params: { to: string; text: string; contextToken: string }) => Promise<boolean>,
+  wrappedSendMediaFile: (params: { to: string; filePath: string; text: string; contextToken: string }) => Promise<boolean>,
+): Promise<boolean> {
+  const clipped = action.reply.length > 800 ? action.reply.slice(0, 800) + "..." : action.reply;
+  const files = action.type === "executed" ? action.files || [] : [];
+  if (files.length === 0) {
+    return wrappedSendText({ to, text: clipped, contextToken });
+  }
+  for (let index = 0; index < files.length; index++) {
+    const sent = await wrappedSendMediaFile({
+      to,
+      filePath: files[index],
+      text: index === 0 ? clipped : "",
+      contextToken,
+    });
+    if (!sent) {
+      return false;
+    }
+  }
+  return true;
+}
+
 // --- State machine helpers ---
 
 function advanceState(
@@ -740,18 +938,18 @@ async function finalizeAction(
   entry: InboxEntry,
   action: ActionResult,
   wrappedSendText: (params: { to: string; text: string; contextToken: string }) => Promise<boolean>,
+  wrappedSendMediaFile: (params: { to: string; filePath: string; text: string; contextToken: string }) => Promise<boolean>,
 ): Promise<void> {
   const state = loadState(config.statePath);
   const lifecycle = state.messageStates[entry.id];
   const failCount = lifecycle?.failCount ?? 0;
 
   if (action.type === "chat" || action.type === "executed") {
-    const clipped = action.reply.length > 800 ? action.reply.slice(0, 800) + "..." : action.reply;
-    const sent = await wrappedSendText({ to: entry.fromUserId, text: clipped, contextToken: entry.contextToken || "" });
+    const sent = await sendActionReply(action, entry.fromUserId, entry.contextToken || "", wrappedSendText, wrappedSendMediaFile);
     if (sent) {
       advanceState(config, entry.id, "replied", failCount);
       await safeMarkInboxRead([entry.id], config);
-      logLine(config, `Sent ${action.type}: "${clipped.slice(0, 80)}"`);
+      logLine(config, `Sent ${action.type}: "${action.reply.slice(0, 80)}"`);
     }
     return;
   }
@@ -914,6 +1112,8 @@ async function processUnreadMessages(config: AutoReplyConfig): Promise<number> {
 
   const wrappedSendText = (params: { to: string; text: string; contextToken: string }) =>
     safeSendText(sendText, account, getUpdates, config, params, 2);
+  const wrappedSendMediaFile = (params: { to: string; filePath: string; text: string; contextToken: string }) =>
+    safeSendMediaFile(sendMediaFile, account, getUpdates, config, { ...params, cdnBaseUrl: CDN_BASE_URL }, 2);
 
   const state = loadState(config.statePath);
 
@@ -925,8 +1125,7 @@ async function processUnreadMessages(config: AutoReplyConfig): Promise<number> {
     // If we have a cached action (classified before crash), send it directly
     if (lifecycle.cachedAction && (lifecycle.cachedAction.type === "chat" || lifecycle.cachedAction.type === "executed")) {
       const a = lifecycle.cachedAction;
-      const clipped = a.reply.length > 800 ? a.reply.slice(0, 800) + "..." : a.reply;
-      const sent = await wrappedSendText({ to: entry.fromUserId, text: clipped, contextToken: entry.contextToken || "" });
+      const sent = await sendActionReply(a, entry.fromUserId, entry.contextToken || "", wrappedSendText, wrappedSendMediaFile);
       if (sent) {
         advanceState(config, entry.id, "replied", lifecycle.failCount);
         await safeMarkInboxRead([entry.id], config);
@@ -937,7 +1136,7 @@ async function processUnreadMessages(config: AutoReplyConfig): Promise<number> {
     // Otherwise re-process from scratch
     advanceState(config, entry.id, "classifying", lifecycle.failCount);
     const action = await handleMessage(entry, wrappedSendText, config);
-    await finalizeAction(config, entry, action, wrappedSendText);
+    await finalizeAction(config, entry, action, wrappedSendText, wrappedSendMediaFile);
   }
 
   let unreadEntries: InboxEntry[] = [];
@@ -997,9 +1196,8 @@ async function processUnreadMessages(config: AutoReplyConfig): Promise<number> {
         });
 
         if (action.type === "executed" || action.type === "chat") {
-          const clipped = action.reply.length > 800 ? action.reply.slice(0, 800) + "..." : action.reply;
-          await wrappedSendText({ to: entry.fromUserId, text: clipped, contextToken: entry.contextToken || pc.contextToken || "" });
-          logLine(config, `Risk executed for ${pc.inboxId}: "${clipped.slice(0, 80)}"`);
+          await sendActionReply(action, entry.fromUserId, entry.contextToken || pc.contextToken || "", wrappedSendText, wrappedSendMediaFile);
+          logLine(config, `Risk executed for ${pc.inboxId}: "${action.reply.slice(0, 80)}"`);
         } else if (action.type === "failed") {
           await wrappedSendText({ to: entry.fromUserId, text: `执行失败：${action.reason}`, contextToken: entry.contextToken || "" });
         }
@@ -1048,7 +1246,7 @@ async function processUnreadMessages(config: AutoReplyConfig): Promise<number> {
       advanceState(config, entry.id, "classified", 0, action);
     }
 
-    await finalizeAction(config, entry, action, wrappedSendText);
+    await finalizeAction(config, entry, action, wrappedSendText, wrappedSendMediaFile);
     replied++;
     break; // ONE reply per poll cycle
   }
