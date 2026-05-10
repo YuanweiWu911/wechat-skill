@@ -13,3 +13,4 @@ figure/
 **/__pycache__/
 risk-test-run.log
 risk-timeout-probe-created.txt
+skills-lock.json
