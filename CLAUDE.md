@@ -37,6 +37,7 @@ When modifying `wechat-skill-2`, treat the watcher behavior below as a contract,
 - **Delete contract:** simple project-local file deletions may be handled by the watcher locally, but only for safe relative paths inside the project root
 - **File transfer contract:** project-local whitelisted single-file transfers may be handled locally by the watcher; files over `10MB` require a second confirmation before sending
 - **Ack contract:** watcher code must not rely on in-process writes to `~/.claude/channels/weixin/inbox-state.json`; unread acknowledgements should go through `weixin-inbox.ps1 ack`
+- **Start entry contract:** `wechat-skill-2` supports `/wechat-skill-2 --start` as a skill-entry control mode; this must route in `collect-wechat.ps1` before inbox import, stay exclusive with all other arguments, and only return success after the project watcher is observably running
 - **Stop entry contract:** `wechat-skill-2` supports `/wechat-skill-2 --stop` as a skill-entry control mode; this must route in `collect-wechat.ps1` before inbox import and must stay exclusive with `--all` / `--limit`
 
 ## Security: WeChat skill chain (`wechat-skill-2`)
@@ -51,6 +52,7 @@ Current watcher/runtime layout:
 - Risk behavior: simple chat replies are sent directly; safe read/search/web tasks execute directly; create/write/delete/script/install/config-changing requests require confirmation
 - Risk delete fallback: confirmed simple project-local file deletions can be executed locally by the watcher to avoid Claude tool sandbox limitations
 - File transfer behavior: project-local whitelisted single files can be sent as attachments directly; oversized files require confirmation; current matching is exact relative-path matching, not fuzzy filename search
+- Start entry behavior: `collect-wechat.ps1` accepts `--start` as a control-mode argument, starts the project watcher via `start-wechat-auto.ps1`, and exits without running inbox import; default `/wechat-skill-2` remains import-only and does not implicitly start the watcher
 - Stop entry behavior: `collect-wechat.ps1` accepts `--stop` as a control-mode argument, stops the project watcher via `stop-wechat-auto.ps1`, and exits without running inbox import
 
 Key risks to be aware of when modifying or extending this skill:

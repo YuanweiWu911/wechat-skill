@@ -201,11 +201,11 @@ function runCommand(
   };
 }
 
-function runCollectWechat(args: string[]): CommandResult {
+function runCollectWechat(args: string[], options?: { env?: Record<string, string>; timeout?: number }): CommandResult {
   return runCommand(
     "powershell",
     ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", join(skillDir, "collect-wechat.ps1"), ...args],
-    { timeout: 30000 },
+    { timeout: options?.timeout || 30000, env: options?.env },
   );
 }
 
@@ -1631,6 +1631,72 @@ function runWatcherTests(): TestResult[] {
       ? "PASS"
       : "FAIL",
     `status=${collectStopExtraArg.status} stdout=${collectStopExtraArg.stdout || "无输出"} stderr=${collectStopExtraArg.stderr || "无输出"} error=${collectStopExtraArg.error || "无"}`,
+  );
+
+  runCommand(
+    "powershell",
+    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", stopScript],
+    { timeout: 30000 },
+  );
+  const collectStart = runCollectWechat(["--start"]);
+  const collectStartReady = waitUntil(15000, () => {
+    const pid = readRegisteredRunnerPid(pidPath);
+    return pid !== null && processExists(pid);
+  });
+  const collectStartPid = readRegisteredRunnerPid(pidPath);
+  push(
+    results,
+    "collect-wechat.ps1 --start starts watcher and normalizes success text",
+    collectStart.status === 0 &&
+      collectStart.stdout.includes("已启动 watcher。") &&
+      collectStartReady &&
+      collectStartPid !== null
+      ? "PASS"
+      : "FAIL",
+    `status=${collectStart.status} ready=${collectStartReady} pid=${collectStartPid ?? "null"} stdout=${collectStart.stdout || "无输出"} stderr=${collectStart.stderr || "无输出"} error=${collectStart.error || "无"}`,
+  );
+
+  const collectStartAgain = runCollectWechat(["--start"]);
+  push(
+    results,
+    "collect-wechat.ps1 --start reports watcher already running",
+    collectStartAgain.status === 0 && collectStartAgain.stdout.includes("watcher 已在运行。")
+      ? "PASS"
+      : "FAIL",
+    `status=${collectStartAgain.status} stdout=${collectStartAgain.stdout || "无输出"} stderr=${collectStartAgain.stderr || "无输出"} error=${collectStartAgain.error || "无"}`,
+  );
+
+  const collectStartConflict = runCollectWechat(["--start", "foo"]);
+  push(
+    results,
+    "collect-wechat.ps1 --start rejects mixed arguments",
+    collectStartConflict.status !== 0 &&
+      /参数冲突：--start 必须单独使用。/.test(
+        [collectStartConflict.stdout, collectStartConflict.stderr, collectStartConflict.error].join("\n"),
+      )
+      ? "PASS"
+      : "FAIL",
+    `status=${collectStartConflict.status} stdout=${collectStartConflict.stdout || "无输出"} stderr=${collectStartConflict.stderr || "无输出"} error=${collectStartConflict.error || "无"}`,
+  );
+
+  runCommand(
+    "powershell",
+    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", stopScript],
+    { timeout: 30000 },
+  );
+  const collectStartNoObserve = runCollectWechat(["--start"], {
+    env: { WECHAT_AUTO_REPLY_CHILD: "1" },
+  });
+  push(
+    results,
+    "collect-wechat.ps1 --start fails when watcher is not observably running after start",
+    collectStartNoObserve.status !== 0 &&
+      /启动 watcher 失败。/.test(
+        [collectStartNoObserve.stdout, collectStartNoObserve.stderr, collectStartNoObserve.error].join("\n"),
+      )
+      ? "PASS"
+      : "FAIL",
+    `status=${collectStartNoObserve.status} stdout=${collectStartNoObserve.stdout || "无输出"} stderr=${collectStartNoObserve.stderr || "无输出"} error=${collectStartNoObserve.error || "无"}`,
   );
 
   const collectSyncDefault = runCollectWechat([]);
