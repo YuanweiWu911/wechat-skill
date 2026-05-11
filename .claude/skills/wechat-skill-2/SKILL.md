@@ -1,176 +1,107 @@
 ---
 name: wechat-skill-2
-description: 自动同步本地微信 inbox，导入消息上下文。后台 Watcher 会自动处理消息：闲聊直接回复、安全指令自动执行、项目内白名单文件可直发，创建/写入/删除等风险操作等待确认。
+description: 基于 cc-weixin v0.2.1 的微信后台驻守与自动回复技能。消息通过 MCP channel push 直接进入对话上下文；后台 Watcher 自动处理闲聊、安全执行、文件发送和风险确认。
 user-invocable: true
 argument-hint: "[--start] [--stop] [--all] [--limit N]"
 disable-model-invocation: true
 ---
 
-# WeChat Skill 2.0
+# WeChat Skill 2
 
-## 隐私与安全提示
+## 当前版本
 
-使用本技能时请注意：微信消息将被导入 Claude 对话上下文并发送至 Anthropic API；消息以明文存储在本地 `~/.claude/channels/weixin/inbox.jsonl`；媒体文件下载到 `%TMP%/weixin-media/` 共享临时目录。
+- 当前仓库中的 `wechat-skill-2` 已升级为 **兼容 `cc-weixin v0.2.1`** 的版本。
+- 新版本不再依赖 `cli-inbox.ts`、`inbox.jsonl`、`copy/export` 导入流程。
+- 微信消息通过 `cc-weixin v0.2.1` 的 **MCP channel push** 直接进入 Claude 对话上下文，Watcher 负责后台驻守、分类、执行、回复和风险确认。
 
-## 自动回复机制（Watcher 后台运行）
+## 依赖插件与安装来源
 
-Watcher 通过 SessionStart 钩子（`start-wechat-auto.ps1`）在每次 Claude Code 会话启动时自动在后台运行，无需确认。
+- 依赖插件：`cc-weixin v0.2.1`
+- 安装方式：请从 **Skill Market** 安装 `cc-weixin`
+- 上游源码仓库：`https://github.com/qufei1993/cc-weixin`
+- Git 仓库地址：`https://github.com/qufei1993/cc-weixin.git`
 
-当用户在微信发消息时，Watcher 自动调用 LLM 分析语义并按以下路径处理：
+## 新版消息链路
 
-### 路径 A：纯闲聊
-用户说"你好"、"哈哈"等 → LLM 直接生成自然回复 → 通过微信发送 → 本轮结束。
+新版 `cc-weixin` 的消息传递链路如下：
 
-### 路径 B：安全操作
-用户要求查看文件、列出目录、搜索内容等 → LLM 用 Glob/LS/Read/Write 直接执行 → 将结果通过微信发送 → 本轮结束。
-用户要求查询实时信息（天气、新闻、百科等）→ LLM 优先用 WebSearch/WebFetch 搜索 → 将结果通过微信发送 → 本轮结束。
-用户要求发送项目内白名单文件（如 `CLAUDE.md`、`.claude/settings.local.json`）→ Watcher 直接发送附件 → 本轮结束。
+1. `cc-weixin` 使用 `getUpdates` 长轮询微信 iLink Bot API。
+2. 新消息通过 MCP `notifications/claude/channel` 进入 Claude 上下文。
+3. 你会在对话里看到 `<channel source="weixin" ...>` 通知。
+4. `wechat-auto-reply.ts` 作为后台 watcher 持续运行，处理自动回复、风险确认、文件发送和本地状态持久化。
+5. watcher 使用项目内 `.claude/wechat-auto-cursor.txt` 持久化自己的 cursor，避免与 `cc-weixin` 主进程抢共享游标。
 
-安全操作示例：查看目录、搜索文件、读取内容、获取信息、查询天气、搜索网络、发送项目内白名单文件。
+## 当前能力
 
-### 路径 C：风险操作
-用户要求创建文件、写入文件、删除文件、修改系统、安装软件、执行脚本等 → Watcher 不直接执行，通过微信询问确认 → 用户回复"是"则执行 → 回复"不"则取消 → 本轮结束。
+- **闲聊自动回复：** 如“你好”“你是谁”等，直接回复。
+- **安全请求自动执行：** 如读取文件、列目录、搜索内容、查询天气/网页信息。
+- **项目内白名单文件直发：** 允许 `.json`、`.md`、`.txt`、`.yaml`、`.yml`、`.log`、`.ts`、`.pdf`、`.docx`、`.pptx`、`.xlsx`。
+- **风险请求二次确认：** 创建、写入、删除、安装、执行脚本、修改配置等必须先确认。
+- **简单删除本地兜底：** 对确认后的简单项目内删除请求，可由 watcher 本地执行，避免工具沙箱误伤。
 
-风险操作示例：创建文件、写入文件、删除文件、修改配置、安装程序、执行脚本。
+## 技能入口
 
-## Watcher 当前行为
-
-- 单实例运行：`start-wechat-auto.ps1` / `start-wechat-auto-runner.ps1` 会避免重复启动与互相抢占。
-- 去重读取：Watcher 会对 `inbox.jsonl` 中重复的 message id 去重，避免重复恢复和重复回复。
-- 风险确认稳定：原始风险消息不会在待确认期间清空 `pendingConfirmation`，用户回复"是" / "不"会优先命中确认分支。
-- 风险执行兜底：对确认后的简单项目内文件删除（如 `删除test.txt`），Watcher 会优先在本地执行删除，避免受 Claude 工具沙箱限制影响。
-- 文件传输：对项目内白名单单文件发送请求，Watcher 会优先本地发送附件，不再退化成“先读文件再摘要回复”。
-- 大文件确认：白名单文件超过 `10MB` 时不会直接发送，而是先发起二次确认，用户回复"是"后再发送。
-- 路径边界：当前文件发送按项目内相对路径精确匹配，例如 `将.claude/settings.local.json文件发给我` 可以命中，`将settings.local.json文件发给我` 当前不会自动补全路径。
-
-## 行为契约
-
-Claude 在参与 `wechat-skill-2` 的分类、执行、回复时，必须遵守以下契约：
-
-### 1. 分类契约
-
-- 每条消息只能落入 `chat`、`executed`、`risky` 这 3 条业务路径之一。
-- 纯闲聊、问候、寒暄优先归类为 `chat`。
-- 读取目录、搜索内容、读取文件、查询天气/网络信息等只读或查询类操作归类为 `executed`。
-- 创建文件、写入文件、删除文件、执行脚本、安装软件、修改配置、修改系统状态等，必须归类为 `risky`，不得直接执行。
-
-### 2. 风险确认契约
-
-- 风险操作必须先发送确认提示，再等待用户回复。
-- 用户回复 `是`、`好`、`可以`、`确认`、`yes` 等确认词时，优先解释为“确认执行”，不得回落到普通闲聊。
-- 用户回复 `不`、`取消`、`no` 等拒绝词时，优先解释为“取消执行”。
-- 在待确认期间，原始风险消息本身不得清空待确认状态，也不得被重新当成一条新请求处理。
-
-### 3. 删除执行契约
-
-- 对确认后的简单项目内文件删除请求，Watcher 可以直接在本地执行删除。
-- 仅允许删除项目根目录内的相对路径文件。
-- 包含绝对路径、盘符路径、根路径、`..` 越界路径的删除请求，不得走本地删除捷径。
-
-### 4. 回复契约
-
-- 每条消息最多触发一条主回复，不得在风险确认完成后再追加一条普通闲聊回复。
-- 风险执行完成后，必须返回明确结果，例如“已创建”“已删除”“已取消”“执行失败”。
-- 文件发送成功时，应返回明确发送结果，并通过微信附件链路发送文件，不得退化成只返回文件内容摘要。
-
-### 5. 未读确认契约
-
-- Watcher 不应在受限进程内直接写 `~/.claude/channels/weixin/inbox-state.json`。
-- 标记消息已读必须通过 `weixin-inbox.ps1 ack` 完成，以规避 Trae 沙箱对插件状态目录写入的限制。
-
-### 6. 文件传输契约
-
-- 当前仅支持项目根目录内的白名单单文件发送：`.json`、`.md`、`.txt`、`.yaml`、`.yml`、`.log`、`.ts`、`.pdf`、`.docx`、`.pptx`、`.xlsx`。
-- 仅允许相对路径，且不得包含绝对路径、盘符路径、根路径或 `..` 越界路径。
-- 小于等于 `10MB` 的白名单文件可直接发送。
-- 大于 `10MB` 的白名单文件必须先确认，再发送。
-
-### 7. Start 入口契约
-
-- `--start` 是 skill 入口层控制命令，命中后必须短路正常导入流程，不得透传给 `weixin-inbox.ps1 copy/export`。
-- `--start` 只能单独使用，不得与其他参数混用。
-- `/wechat-skill-2 --start` 只负责启动当前项目的后台 watcher，并立即退出。
-- 仅当观察到当前项目 watcher 已在后台运行时，才返回启动成功。
-- 默认 `/wechat-skill-2` 仍然只做 inbox 导入，不会隐式启动 watcher。
-
-### 8. Stop 入口契约
-
-- `--stop` 是 skill 入口层控制命令，命中后必须短路正常导入流程，不得透传给 `weixin-inbox.ps1 copy/export`。
-- `--stop` 只能单独使用，不得与 `--all`、`--limit` 混用。
-- `/wechat-skill-2 --stop` 只负责停止当前项目的后台 watcher，并立即退出。
-
-## 你必须在每次调用后自动完成以下 3 步
-
-### 第 1 步：导入微信消息
+### 启动 watcher
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/collect-wechat.ps1" <ARGUMENTS>
+powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/collect-wechat.ps1" --start
 ```
 
-- `--start`：启动当前项目的后台 watcher，并直接退出，不导入微信消息
-- `--stop`：停止当前项目的后台 watcher，并直接退出，不导入微信消息
-- 默认：只处理未读消息
-- `--all`：包含已读消息
-- `--limit N`：限制导入条数
+- 只负责启动当前项目的后台 watcher。
+- 成功条件是观察到 watcher 已经在后台运行。
 
-### 第 2 步：检查待处理风险确认（可选）
+### 停止 watcher
 
-如果 Watcher 暂停、崩溃，或需手动审核风险操作：
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/collect-wechat.ps1" --stop
+```
+
+- 只负责停止当前项目的后台 watcher。
+
+### 查看当前状态
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/collect-wechat.ps1"
+```
+
+- 默认不再导入 inbox。
+- 只输出 watcher 状态，并提示当前已经切换到 MCP channel push 模式。
+
+## 风险确认审核
+
+当 watcher 进入需要人工审核的场景时，可使用：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/wechat-approve.ps1" list
 ```
 
-每条包含：`[PENDING]` id, 原始消息, 拟回复文本, Raw 执行输出。
-
-**审核标准：**
-- **通过**：`rawOutput` 有实际执行痕迹（Bash 输出、文件列表、Read 内容）→ 批准
-- **不通过**：`rawOutput` 只有聊天内容、或只说"好的"、"等下"等 → 拒绝，文案改写后再批准
-
-**批准后必须立即用 MCP 发送：**
-
-使用 `mcp__plugin_weixin_weixin__reply` 工具：
-
-```
-chat_id: <pending 条目中 fromUserId 的值>
-text: <pending 条目中 replyText 的值，原样发送>
-```
-
-发送成功后，标记 pending 为已处理：
+其他常用命令：
 
 ```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/wechat-approve.ps1" count
 powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/wechat-approve.ps1" approve <pending-id>
+powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/wechat-approve.ps1" reject <pending-id>
 ```
 
-### 第 3 步：展示结果
+## 行为契约
 
-简短报告：导入了多少条消息，Watcher 已自动处理了多少条；如存在风险确认，说明是已自动发出确认还是仍待人工审核。
+- 每条消息必须且只能归入 `chat`、`executed`、`risky` 三类之一。
+- 创建、写入、删除、安装、脚本执行、配置修改等必须归入 `risky`。
+- 在 `pendingConfirmation` 存在时，`是` / `确认` / `yes` 必须优先解释为确认执行，`不` / `取消` / `no` 必须优先解释为取消执行。
+- 风险确认完成后，不得再额外补一条闲聊回复。
+- 项目内简单删除只允许安全相对路径，不允许绝对路径、盘符路径、根路径或 `..` 越界路径。
+- 文件发送仅允许项目根目录内白名单单文件；超过 `10MB` 必须先确认。
+- 代码和文档不得再依赖 `cli-inbox.ts`、`inbox.jsonl`、`markInboxRead()` 之类旧架构。
 
-## 发送微信消息的方法
+## 隐私与安全提示
 
-**唯一正确的方法：`mcp__plugin_weixin_weixin__reply`**
-
-纯文本：
-```
-mcp__plugin_weixin_weixin__reply
-  chat_id: o9cq800Z_OcxBhGABZk4agJWxLP0@im.wechat
-  text: 回复内容
-```
-
-带附件：
-```
-mcp__plugin_weixin_weixin__reply
-  chat_id: o9cq800Z_OcxBhGABZk4agJWxLP0@im.wechat
-  text: 说明文字
-  files: ["C:\\Users\\len\\ywwu_workspace\\claude_skill_learn\\figure\\1.jpg"]
-```
-
-- `files` 必须是绝对路径
+- 微信消息会进入 Claude 对话上下文，并发送到 Anthropic API。
+- `cc-weixin` 当前建议通过 **Skill Market** 安装；GitHub 仓库仅用于查看源码、版本信息和问题追踪。
+- 后台 watcher 会在本地持久化运行状态、cursor、pending 审核信息和日志。
+- 所有 PowerShell 脚本都以 `-ExecutionPolicy Bypass` 运行，应将本仓库视作高权限自动化环境。
 
 ## 常见用法
 
-- `/wechat-skill-2 --start` — 启动后台 watcher 并立即退出
-- `/wechat-skill-2 --stop` — 停止后台 watcher 并立即退出
-- `/wechat-skill-2` — 导入未读 + 审核 + 发送
-- `/wechat-skill-2 --limit 10` — 仅最近 10 条
-- `/wechat-skill-2 --all --limit 20` — 包含已读
+- `/wechat-skill-2 --start`：启动后台 watcher
+- `/wechat-skill-2 --stop`：停止后台 watcher
+- `/wechat-skill-2`：查看 watcher 状态，并提示 MCP channel push 已启用
