@@ -1,8 +1,8 @@
-# `/wechat-skill-2 --stop` Design
+# `/wechat-skill --stop` Design
 
 ## Goal
 
-Add a `--stop` control mode to `wechat-skill-2` so the user can terminate the background watcher directly from the skill entrypoint.
+Add a `--stop` control mode to `wechat-skill` so the user can terminate the background watcher directly from the skill entrypoint.
 
 The feature must:
 
@@ -16,12 +16,12 @@ The feature must:
 
 Current behavior is split across these files:
 
-- `.claude/skills/wechat-skill-2/SKILL.md`: user-facing skill contract and argument hint
-- `.claude/skills/wechat-skill-2/collect-wechat.ps1`: current skill entry script that forwards arguments to `weixin-inbox.ps1 copy/export`
+- `.claude/skills/wechat-skill/SKILL.md`: user-facing skill contract and argument hint
+- `.claude/skills/wechat-skill/collect-wechat.ps1`: current skill entry script that forwards arguments to `weixin-inbox.ps1 copy/export`
 - `.claude/hooks/stop-wechat-auto.ps1`: current project-scoped stop implementation for runner/watcher processes
 - `.claude/hooks/start-wechat-auto.ps1` and `.claude/hooks/start-wechat-auto-runner.ps1`: current auto-start and runner ownership chain
 
-The stop capability already exists at the hook layer. The missing piece is a skill-level control branch that exposes it as `/wechat-skill-2 --stop`.
+The stop capability already exists at the hook layer. The missing piece is a skill-level control branch that exposes it as `/wechat-skill --stop`.
 
 ## Chosen Approach
 
@@ -29,7 +29,7 @@ Implement `--stop` inside `collect-wechat.ps1` as an exclusive control-mode bran
 
 Why this approach:
 
-- keeps one stable user entrypoint for `wechat-skill-2`
+- keeps one stable user entrypoint for `wechat-skill`
 - reuses the existing and tested `stop-wechat-auto.ps1` implementation
 - minimizes surface area compared with introducing a second stop wrapper script
 - makes parameter validation straightforward
@@ -47,7 +47,7 @@ This is semantically wrong because `weixin-inbox.ps1` handles inbox copy/export,
 
 ## Architecture
 
-`wechat-skill-2` keeps a single top-level entrypoint in `SKILL.md`, still calling `collect-wechat.ps1`.
+`wechat-skill` keeps a single top-level entrypoint in `SKILL.md`, still calling `collect-wechat.ps1`.
 
 `collect-wechat.ps1` gains a lightweight argument router:
 
@@ -75,10 +75,10 @@ The underlying stop script remains the single source of truth for pid-file clean
 
 Rules:
 
-- `/wechat-skill-2 --stop` is valid
-- `/wechat-skill-2 --stop --all` is invalid
-- `/wechat-skill-2 --stop --limit 10` is invalid
-- `/wechat-skill-2 --stop --all --limit 10` is invalid
+- `/wechat-skill --stop` is valid
+- `/wechat-skill --stop --all` is invalid
+- `/wechat-skill --stop --limit 10` is invalid
+- `/wechat-skill --stop --all --limit 10` is invalid
 - repeated `--stop` flags should still resolve to stop mode, but do not need special meaning beyond that
 
 If mixed arguments are detected, the script should fail fast with a non-zero exit code and a clear conflict message.
@@ -149,12 +149,12 @@ The existing stop coverage in `test-watcher.ts` already proves the underlying st
 
 ## Documentation Changes
 
-### `.claude/skills/wechat-skill-2/SKILL.md`
+### `.claude/skills/wechat-skill/SKILL.md`
 
 Update:
 
 - `argument-hint` to include `--stop`
-- common usage examples to include `/wechat-skill-2 --stop`
+- common usage examples to include `/wechat-skill --stop`
 - the execution instructions to explain that `--stop` is a control mode that stops and exits
 - the behavior contract to state that `--stop` must not be forwarded into the inbox sync chain
 
@@ -162,7 +162,7 @@ Update:
 
 Update repository guidance to record:
 
-- `wechat-skill-2` has a stop control entrypoint
+- `wechat-skill` has a stop control entrypoint
 - `--stop` is exclusive with sync arguments
 - the skill entry layer is responsible for routing stop mode before inbox import
 
@@ -185,8 +185,8 @@ The implementation should remain narrow:
 
 The feature is done when:
 
-- `/wechat-skill-2 --stop` cleanly stops this project's watcher
-- `/wechat-skill-2 --stop` reports a distinct "already not running" result when appropriate
+- `/wechat-skill --stop` cleanly stops this project's watcher
+- `/wechat-skill --stop` reports a distinct "already not running" result when appropriate
 - mixed stop/sync arguments fail clearly
 - normal sync usage remains unchanged
 - tests cover the new skill-entry branch

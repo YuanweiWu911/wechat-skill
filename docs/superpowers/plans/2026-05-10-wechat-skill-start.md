@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add `/wechat-skill-2 --start` so the skill can explicitly start the current project's background watcher and return normalized status text only after startup is observably running.
+**Goal:** Add `/wechat-skill --start` so the skill can explicitly start the current project's background watcher and return normalized status text only after startup is observably running.
 
 **Architecture:** Extend `collect-wechat.ps1` with a new exclusive `--start` control branch that reuses `start-wechat-auto.ps1`, validates arguments, checks project-scoped running state, polls for observable startup success, and keeps default inbox import unchanged. Drive the change with focused watcher-script regression tests in `test-watcher.ts`, then sync the skill and repo docs.
 
@@ -12,11 +12,11 @@
 
 ## File Structure
 
-- Modify: `.claude/skills/wechat-skill-2/collect-wechat.ps1`
+- Modify: `.claude/skills/wechat-skill/collect-wechat.ps1`
   - Add `--start` argument handling, project-scoped watcher running detection, startup polling, normalized success and failure text.
 - Modify: `test-watcher.ts`
   - Add failing and passing regression coverage for `--start` startup, already-running detection, exclusive-argument rejection, and default import safety.
-- Modify: `.claude/skills/wechat-skill-2/SKILL.md`
+- Modify: `.claude/skills/wechat-skill/SKILL.md`
   - Document the new `--start` argument, common usage, and the start entry contract.
 - Modify: `CLAUDE.md`
   - Add repo-level contract for the explicit start control entry.
@@ -161,7 +161,7 @@ git commit -m "test: add failing wechat start coverage"
 ### Task 2: Implement Minimal `--start` Support
 
 **Files:**
-- Modify: `c:\Users\len\ywwu_workspace\claude_skill_learn\.claude\skills\wechat-skill-2\collect-wechat.ps1`
+- Modify: `c:\Users\len\ywwu_workspace\claude_skill_learn\.claude\skills\wechat-skill\collect-wechat.ps1`
 - Test: `c:\Users\len\ywwu_workspace\claude_skill_learn\test-watcher.ts`
 
 - [ ] **Step 1: Add project-scoped running detection helpers to `collect-wechat.ps1`**
@@ -307,7 +307,7 @@ Expected after implementation:
 Check:
 
 ```text
-file:///c:/Users/len/ywwu_workspace/claude_skill_learn/.claude/skills/wechat-skill-2/collect-wechat.ps1
+file:///c:/Users/len/ywwu_workspace/claude_skill_learn/.claude/skills/wechat-skill/collect-wechat.ps1
 file:///c:/Users/len/ywwu_workspace/claude_skill_learn/test-watcher.ts
 ```
 
@@ -318,14 +318,14 @@ Expected:
 - [ ] **Step 6: Commit the implementation**
 
 ```powershell
-git add .claude/skills/wechat-skill-2/collect-wechat.ps1 test-watcher.ts
+git add .claude/skills/wechat-skill/collect-wechat.ps1 test-watcher.ts
 git commit -m "feat: add wechat skill start mode"
 ```
 
 ### Task 3: Document the `--start` Contract
 
 **Files:**
-- Modify: `c:\Users\len\ywwu_workspace\claude_skill_learn\.claude\skills\wechat-skill-2\SKILL.md`
+- Modify: `c:\Users\len\ywwu_workspace\claude_skill_learn\.claude\skills\wechat-skill\SKILL.md`
 - Modify: `c:\Users\len\ywwu_workspace\claude_skill_learn\CLAUDE.md`
 - Modify: `c:\Users\len\ywwu_workspace\claude_skill_learn\CLAUDE_CN.md`
 
@@ -340,7 +340,7 @@ argument-hint: "[--start] [--stop] [--all] [--limit N]"
 And add:
 
 ```md
-- `/wechat-skill-2 --start` — 启动后台 watcher 并立即退出
+- `/wechat-skill --start` — 启动后台 watcher 并立即退出
 ```
 
 - [ ] **Step 2: Add the start entry contract to the skill doc**
@@ -352,7 +352,7 @@ Insert a new section near the existing `Stop 入口契约`:
 
 - `--start` 是 skill 入口层控制命令，命中后必须短路正常导入流程，不得透传给 `weixin-inbox.ps1 copy/export`。
 - `--start` 只能单独使用，不得与其他参数混用。
-- `/wechat-skill-2 --start` 只负责启动当前项目的后台 watcher，并立即退出。
+- `/wechat-skill --start` 只负责启动当前项目的后台 watcher，并立即退出。
 - 仅当观察到当前项目 watcher 已在后台运行时，才返回启动成功。
 ```
 ```
@@ -366,7 +366,7 @@ Add parallel start-entry bullets near the existing stop-entry contract sections:
 ```md
 - `collect-wechat.ps1` must treat `--start` as an exclusive control mode before inbox import.
 - `--start` must only return success after the current project's watcher is observably running.
-- Default `/wechat-skill-2` remains import-only and must not implicitly start the watcher.
+- Default `/wechat-skill` remains import-only and must not implicitly start the watcher.
 ```
 ```
 
@@ -377,7 +377,7 @@ Use equivalent Chinese wording in `CLAUDE_CN.md`.
 Check:
 
 ```text
-file:///c:/Users/len/ywwu_workspace/claude_skill_learn/.claude/skills/wechat-skill-2/SKILL.md
+file:///c:/Users/len/ywwu_workspace/claude_skill_learn/.claude/skills/wechat-skill/SKILL.md
 file:///c:/Users/len/ywwu_workspace/claude_skill_learn/CLAUDE.md
 file:///c:/Users/len/ywwu_workspace/claude_skill_learn/CLAUDE_CN.md
 ```
@@ -389,7 +389,7 @@ Expected:
 - [ ] **Step 5: Commit the documentation**
 
 ```powershell
-git add .claude/skills/wechat-skill-2/SKILL.md CLAUDE.md CLAUDE_CN.md
+git add .claude/skills/wechat-skill/SKILL.md CLAUDE.md CLAUDE_CN.md
 git commit -m "docs: document wechat skill start mode"
 ```
 
@@ -397,8 +397,8 @@ git commit -m "docs: document wechat skill start mode"
 
 **Files:**
 - Modify: `c:\Users\len\ywwu_workspace\claude_skill_learn\test-watcher.ts`
-- Verify: `c:\Users\len\ywwu_workspace\claude_skill_learn\.claude\skills\wechat-skill-2\collect-wechat.ps1`
-- Verify: `c:\Users\len\ywwu_workspace\claude_skill_learn\.claude\skills\wechat-skill-2\SKILL.md`
+- Verify: `c:\Users\len\ywwu_workspace\claude_skill_learn\.claude\skills\wechat-skill\collect-wechat.ps1`
+- Verify: `c:\Users\len\ywwu_workspace\claude_skill_learn\.claude\skills\wechat-skill\SKILL.md`
 - Verify: `c:\Users\len\ywwu_workspace\claude_skill_learn\CLAUDE.md`
 - Verify: `c:\Users\len\ywwu_workspace\claude_skill_learn\CLAUDE_CN.md`
 
@@ -421,10 +421,10 @@ Expected:
 Run:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\.claude\skills\wechat-skill-2\collect-wechat.ps1 --stop
-powershell -NoProfile -ExecutionPolicy Bypass -File .\.claude\skills\wechat-skill-2\collect-wechat.ps1 --start
-powershell -NoProfile -ExecutionPolicy Bypass -File .\.claude\skills\wechat-skill-2\collect-wechat.ps1 --start
-powershell -NoProfile -ExecutionPolicy Bypass -File .\.claude\skills\wechat-skill-2\collect-wechat.ps1 --stop
+powershell -NoProfile -ExecutionPolicy Bypass -File .\.claude\skills\wechat-skill\collect-wechat.ps1 --stop
+powershell -NoProfile -ExecutionPolicy Bypass -File .\.claude\skills\wechat-skill\collect-wechat.ps1 --start
+powershell -NoProfile -ExecutionPolicy Bypass -File .\.claude\skills\wechat-skill\collect-wechat.ps1 --start
+powershell -NoProfile -ExecutionPolicy Bypass -File .\.claude\skills\wechat-skill\collect-wechat.ps1 --stop
 ```
 
 Expected:
@@ -439,9 +439,9 @@ Expected:
 Check:
 
 ```text
-file:///c:/Users/len/ywwu_workspace/claude_skill_learn/.claude/skills/wechat-skill-2/collect-wechat.ps1
+file:///c:/Users/len/ywwu_workspace/claude_skill_learn/.claude/skills/wechat-skill/collect-wechat.ps1
 file:///c:/Users/len/ywwu_workspace/claude_skill_learn/test-watcher.ts
-file:///c:/Users/len/ywwu_workspace/claude_skill_learn/.claude/skills/wechat-skill-2/SKILL.md
+file:///c:/Users/len/ywwu_workspace/claude_skill_learn/.claude/skills/wechat-skill/SKILL.md
 file:///c:/Users/len/ywwu_workspace/claude_skill_learn/CLAUDE.md
 file:///c:/Users/len/ywwu_workspace/claude_skill_learn/CLAUDE_CN.md
 ```

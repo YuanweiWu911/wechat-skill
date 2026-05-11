@@ -1,8 +1,8 @@
-# /wechat-skill-2 --start Design
+# /wechat-skill --start Design
 
 ## Summary
 
-Add an explicit `/wechat-skill-2 --start` control mode so the skill can start the current project's background watcher on demand. The new mode is symmetric with the existing `--stop` entry:
+Add an explicit `/wechat-skill --start` control mode so the skill can start the current project's background watcher on demand. The new mode is symmetric with the existing `--stop` entry:
 
 - `--start` is an exclusive control argument
 - it short-circuits the normal inbox import flow
@@ -14,15 +14,15 @@ This is a new skill-entry capability, not a rewrite of the watcher startup inter
 
 ## Goals
 
-- Add `/wechat-skill-2 --start` as an explicit way to start the current project's watcher
-- Keep the skill entry behavior symmetric with `/wechat-skill-2 --stop`
+- Add `/wechat-skill --start` as an explicit way to start the current project's watcher
+- Keep the skill entry behavior symmetric with `/wechat-skill --stop`
 - Reuse `start-wechat-auto.ps1` instead of duplicating startup logic
 - Make success depend on observable watcher state, not only script exit code
-- Preserve the existing default `/wechat-skill-2` import behavior unchanged
+- Preserve the existing default `/wechat-skill` import behavior unchanged
 
 ## Non-Goals
 
-- Do not make default `/wechat-skill-2` implicitly auto-start the watcher
+- Do not make default `/wechat-skill` implicitly auto-start the watcher
 - Do not redesign `start-wechat-auto.ps1` or `start-wechat-auto-runner.ps1`
 - Do not change the existing `--stop` behavior
 - Do not change `wechat-auto-reply.ts` watcher business logic
@@ -46,7 +46,7 @@ However, there is currently no skill entry that explicitly starts the watcher. T
 
 ### Entry Model
 
-`collect-wechat.ps1` remains the single control and import entrypoint for `wechat-skill-2`.
+`collect-wechat.ps1` remains the single control and import entrypoint for `wechat-skill`.
 
 It will support three mutually exclusive modes:
 
@@ -81,7 +81,7 @@ Error text is normalized to:
 
 ### Success Contract
 
-`/wechat-skill-2 --start` returns one of two normalized success messages:
+`/wechat-skill --start` returns one of two normalized success messages:
 
 - `已启动 watcher。`
 - `watcher 已在运行。`
@@ -157,25 +157,25 @@ The tests should verify:
 
 Update:
 
-- `.claude/skills/wechat-skill-2/SKILL.md`
+- `.claude/skills/wechat-skill/SKILL.md`
 - `CLAUDE.md`
 - `CLAUDE_CN.md`
 
 Required documentation updates:
 
 - add `--start` to `argument-hint`
-- document `/wechat-skill-2 --start` in common usage
+- document `/wechat-skill --start` in common usage
 - add a `Start` entry contract alongside the existing `Stop` contract
 - explain that `--start` only starts the watcher and exits
-- explain that default `/wechat-skill-2` still does not implicitly start the watcher
+- explain that default `/wechat-skill` still does not implicitly start the watcher
 
 ## Implementation Scope
 
 Files expected to change:
 
-- `.claude/skills/wechat-skill-2/collect-wechat.ps1`
+- `.claude/skills/wechat-skill/collect-wechat.ps1`
 - `test-watcher.ts`
-- `.claude/skills/wechat-skill-2/SKILL.md`
+- `.claude/skills/wechat-skill/SKILL.md`
 - `CLAUDE.md`
 - `CLAUDE_CN.md`
 
@@ -195,9 +195,9 @@ Files explicitly out of scope unless debugging shows a hard blocker:
 
 The feature is complete when all of the following are true:
 
-- `/wechat-skill-2 --start` starts the current project's watcher when it is not running
-- `/wechat-skill-2 --start` returns `watcher 已在运行。` when it is already running
-- `/wechat-skill-2 --start` fails on extra arguments
+- `/wechat-skill --start` starts the current project's watcher when it is not running
+- `/wechat-skill --start` returns `watcher 已在运行。` when it is already running
+- `/wechat-skill --start` fails on extra arguments
 - the command only reports startup success after observable background state appears
-- default `/wechat-skill-2` still behaves as import-only mode
+- default `/wechat-skill` still behaves as import-only mode
 - documentation and tests are updated to match the implementation

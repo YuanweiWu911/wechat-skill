@@ -6,7 +6,7 @@
 
 ## 仓库用途
 
-这是一个用于学习、练习和原型验证 Claude Code 自定义技能的个人沙箱仓库。当前最主要的活跃项目是 `wechat-skill-2`，包含基于 Bun 的 watcher、PowerShell 启动脚本，以及位于 `test-watcher.ts` 的 watcher 回归测试。
+这是一个用于学习、练习和原型验证 Claude Code 自定义技能的个人沙箱仓库。当前最主要的活跃项目是 `wechat-skill`，包含基于 Bun 的 watcher、PowerShell 启动脚本，以及位于 `test-watcher.ts` 的 watcher 回归测试。
 
 ## Skill 开发
 
@@ -28,7 +28,7 @@
 
 ## Watcher 契约
 
-修改 `wechat-skill-2` 时，以下 watcher 行为应被视为契约，而不是建议：
+修改 `wechat-skill` 时，以下 watcher 行为应被视为契约，而不是建议：
 
 - **路径契约：** 每条输入消息必须且只能落到 `chat`、`executed`、`risky` 三条路径之一
 - **风险契约：** 创建、写入、删除、安装、执行脚本、修改配置等请求必须视为 `risky`，不能直接归入 `executed`
@@ -38,10 +38,10 @@
 - **删除契约：** 简单的项目内本地文件删除可以由 watcher 本地执行，但仅限项目根目录内的安全相对路径
 - **文件传输契约：** 项目内白名单单文件发送可以由 watcher 本地执行；超过 `10MB` 的文件必须先进行二次确认
 - **Ack 契约：** watcher 代码不能依赖进程内直接写 `~/.claude/channels/weixin/inbox-state.json`；未读确认应通过 `weixin-inbox.ps1 ack` 完成
-- **Start 入口契约：** `wechat-skill-2` 支持 `/wechat-skill-2 --start` 作为 skill 入口层控制模式；该参数必须在 `collect-wechat.ps1` 中先于 inbox 导入被处理，且必须与其他所有参数保持互斥；只有在观察到当前项目 watcher 已后台运行后，才能返回成功
-- **Stop 入口契约：** `wechat-skill-2` 支持 `/wechat-skill-2 --stop` 作为 skill 入口层控制模式；该参数必须在 `collect-wechat.ps1` 中先于 inbox 导入被处理，且必须与 `--all` / `--limit` 保持互斥
+- **Start 入口契约：** `wechat-skill` 支持 `/wechat-skill --start` 作为 skill 入口层控制模式；该参数必须在 `collect-wechat.ps1` 中先于 inbox 导入被处理，且必须与其他所有参数保持互斥；只有在观察到当前项目 watcher 已后台运行后，才能返回成功
+- **Stop 入口契约：** `wechat-skill` 支持 `/wechat-skill --stop` 作为 skill 入口层控制模式；该参数必须在 `collect-wechat.ps1` 中先于 inbox 导入被处理，且必须与 `--all` / `--limit` 保持互斥
 
-## 安全：微信技能链（`wechat-skill-2`）
+## 安全：微信技能链（`wechat-skill`）
 
 微信集成跨越多层：`SKILL.md` → `collect-wechat.ps1` / `wechat-approve.ps1` → `weixin-inbox.ps1` → `cc-weixin` 插件（GitHub：`qufei1993/cc-weixin`，版本 `v0.2.0`）。它与微信 iLink Bot API `https://ilinkai.weixin.qq.com` 通信。
 
@@ -53,7 +53,7 @@
 - 风险行为：普通闲聊直接回复；安全读/搜/网页查询类任务直接执行；创建/写入/删除/脚本/安装/改配置类请求必须先确认
 - 风险删除兜底：已确认的简单项目内文件删除，可以由 watcher 本地执行，避免受 Claude 工具沙箱限制影响
 - 文件传输行为：项目内白名单单文件可以直接作为附件发送；超大文件需要先确认；当前只支持按相对路径精确匹配，不支持按文件名模糊搜索
-- Start 入口行为：`collect-wechat.ps1` 接受 `--start` 作为控制模式参数，通过 `start-wechat-auto.ps1` 启动当前项目 watcher，并直接退出，不再执行 inbox 导入；默认 `/wechat-skill-2` 仍然只做导入，不会隐式启动 watcher
+- Start 入口行为：`collect-wechat.ps1` 接受 `--start` 作为控制模式参数，通过 `start-wechat-auto.ps1` 启动当前项目 watcher，并直接退出，不再执行 inbox 导入；默认 `/wechat-skill` 仍然只做导入，不会隐式启动 watcher
 - Stop 入口行为：`collect-wechat.ps1` 接受 `--stop` 作为控制模式参数，通过 `stop-wechat-auto.ps1` 停止当前项目 watcher，并直接退出，不再执行 inbox 导入
 
 修改或扩展该 skill 时，需要注意的关键风险：

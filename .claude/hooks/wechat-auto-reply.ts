@@ -248,7 +248,7 @@ function savePendingReply(pendingPath: string, reply: PendingReply): void {
 
 async function safeMarkInboxRead(ids: string[], config: AutoReplyConfig): Promise<void> {
   if (ids.length === 0) return;
-  const scriptPath = join(config.projectRoot, ".claude", "skills", "wechat-skill-2", "weixin-inbox.ps1");
+  const scriptPath = join(config.projectRoot, ".claude", "skills", "wechat-skill", "weixin-inbox.ps1");
   try {
     const result = spawnSync(
       "powershell.exe",

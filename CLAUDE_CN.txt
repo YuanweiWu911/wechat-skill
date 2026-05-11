@@ -6,7 +6,7 @@
 
 ## 仓库用途
 
-这是一个用于学习、练习和原型验证 Claude Code 自定义技能的个人沙箱仓库。当前最主要的活跃项目是 `wechat-skill-2`，包含基于 Bun 的 watcher、PowerShell 启动脚本，以及位于 `test-watcher.ts` 的 watcher 回归测试。
+这是一个用于学习、练习和原型验证 Claude Code 自定义技能的个人沙箱仓库。当前最主要的活跃项目是 `wechat-skill`，包含基于 Bun 的 watcher、PowerShell 启动脚本，以及位于 `test-watcher.ts` 的 watcher 回归测试。
 
 ## Skill 开发
 
@@ -28,7 +28,7 @@
 
 ## Watcher 契约
 
-修改 `wechat-skill-2` 时，以下 watcher 行为应被视为契约，而不是建议：
+修改 `wechat-skill` 时，以下 watcher 行为应被视为契约，而不是建议：
 
 - **路径契约：** 每条输入消息必须且只能落到 `chat`、`executed`、`risky` 三条路径之一
 - **风险契约：** 创建、写入、删除、安装、执行脚本、修改配置等请求必须视为 `risky`，不能直接归入 `executed`
@@ -39,7 +39,7 @@
 - **文件传输契约：** 项目内白名单单文件发送可以由 watcher 本地执行；超过 `10MB` 的文件必须先进行二次确认
 - **Ack 契约：** watcher 代码不能依赖进程内直接写 `~/.claude/channels/weixin/inbox-state.json`；未读确认应通过 `weixin-inbox.ps1 ack` 完成
 
-## 安全：微信技能链（`wechat-skill-2`）
+## 安全：微信技能链（`wechat-skill`）
 
 微信集成跨越多层：`SKILL.md` → `collect-wechat.ps1` / `wechat-approve.ps1` → `weixin-inbox.ps1` → `cc-weixin` 插件（GitHub：`qufei1993/cc-weixin`，版本 `v0.2.0`）。它与微信 iLink Bot API `https://ilinkai.weixin.qq.com` 通信。
 

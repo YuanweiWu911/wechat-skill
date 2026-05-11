@@ -70,7 +70,7 @@ interface PendingConfirmationCase {
 }
 
 const projectRoot = process.cwd();
-const skillDir = join(projectRoot, ".claude", "skills", "wechat-skill-2");
+const skillDir = join(projectRoot, ".claude", "skills", "wechat-skill");
 const hooksDir = join(projectRoot, ".claude", "hooks");
 const stateDir = join(homedir(), ".claude", "channels", "weixin");
 const settingsPath = join(projectRoot, ".claude", "settings.weixin-session.json");

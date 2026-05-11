@@ -1,10 +1,10 @@
-# WeChat Skill 2 Stop Implementation Plan
+# WeChat Skill Stop Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add `/wechat-skill-2 --stop` so the skill can stop the background watcher, return normalized status text, reject mixed sync arguments, and leave normal sync behavior unchanged.
+**Goal:** Add `/wechat-skill --stop` so the skill can stop the background watcher, return normalized status text, reject mixed sync arguments, and leave normal sync behavior unchanged.
 
-**Architecture:** Keep `wechat-skill-2` as a single entrypoint. Add a small argument router in `collect-wechat.ps1` that detects `--stop`, validates exclusivity with `--all` and `--limit`, then delegates to the existing `stop-wechat-auto.ps1` script and normalizes its output. Verify the new branch with focused `test-watcher.ts` coverage, then update the user-facing skill contract and repository guidance.
+**Architecture:** Keep `wechat-skill` as a single entrypoint. Add a small argument router in `collect-wechat.ps1` that detects `--stop`, validates exclusivity with `--all` and `--limit`, then delegates to the existing `stop-wechat-auto.ps1` script and normalizes its output. Verify the new branch with focused `test-watcher.ts` coverage, then update the user-facing skill contract and repository guidance.
 
 **Tech Stack:** PowerShell, Bun/TypeScript test harness, Markdown docs
 
@@ -14,11 +14,11 @@
 
 ### Files to Modify
 
-- `.claude/skills/wechat-skill-2/collect-wechat.ps1`
+- `.claude/skills/wechat-skill/collect-wechat.ps1`
   - Add stop-mode argument parsing, parameter conflict validation, stop-script invocation, and normalized stop output.
 - `test-watcher.ts`
   - Add focused tests for the new skill-entry `--stop` branch without changing existing watcher runtime tests.
-- `.claude/skills/wechat-skill-2/SKILL.md`
+- `.claude/skills/wechat-skill/SKILL.md`
   - Document the new `--stop` argument, exclusive behavior, and common usage.
 - `CLAUDE.md`
   - Record the new stop-entry contract and parameter exclusivity rule for future repository work.
@@ -27,7 +27,7 @@
 
 - `.claude/hooks/stop-wechat-auto.ps1`
   - Existing project-scoped watcher stop implementation that should remain the single source of truth.
-- `docs/superpowers/specs/2026-05-10-wechat-skill-2-stop-design.md`
+- `docs/superpowers/specs/2026-05-10-wechat-skill-stop-design.md`
   - Approved design spec; implementation should stay inside its scope.
 
 ### Files Explicitly Out of Scope
@@ -42,7 +42,7 @@ Do not change watcher runtime/startup behavior unless a failing test proves the 
 
 **Files:**
 - Modify: `c:\Users\len\ywwu_workspace\claude_skill_learn\test-watcher.ts`
-- Read: `c:\Users\len\ywwu_workspace\claude_skill_learn\.claude\skills\wechat-skill-2\collect-wechat.ps1`
+- Read: `c:\Users\len\ywwu_workspace\claude_skill_learn\.claude\skills\wechat-skill\collect-wechat.ps1`
 - Read: `c:\Users\len\ywwu_workspace\claude_skill_learn\.claude\hooks\stop-wechat-auto.ps1`
 
 - [ ] **Step 1: Add a helper that runs `collect-wechat.ps1` directly**
@@ -145,7 +145,7 @@ git commit -m "test: add failing wechat stop entry coverage"
 
 **Files:**
 - Modify: `c:\Users\len\ywwu_workspace\claude_skill_learn\test-watcher.ts`
-- Read: `c:\Users\len\ywwu_workspace\claude_skill_learn\docs\superpowers\specs\2026-05-10-wechat-skill-2-stop-design.md`
+- Read: `c:\Users\len\ywwu_workspace\claude_skill_learn\docs\superpowers\specs\2026-05-10-wechat-skill-stop-design.md`
 
 - [ ] **Step 1: Add a failing mixed-argument test**
 
@@ -194,7 +194,7 @@ git commit -m "test: cover wechat stop argument conflicts"
 ### Task 3: Implement the `collect-wechat.ps1` Stop Router
 
 **Files:**
-- Modify: `c:\Users\len\ywwu_workspace\claude_skill_learn\.claude\skills\wechat-skill-2\collect-wechat.ps1`
+- Modify: `c:\Users\len\ywwu_workspace\claude_skill_learn\.claude\skills\wechat-skill\collect-wechat.ps1`
 - Test: `c:\Users\len\ywwu_workspace\claude_skill_learn\test-watcher.ts`
 
 - [ ] **Step 1: Add stop-path constants and argument inspection**
@@ -286,7 +286,7 @@ PASS collect-wechat.ps1 --stop rejects mixed sync arguments
 
 Use diagnostics on:
 
-- `file:///c:/Users/len/ywwu_workspace/claude_skill_learn/.claude/skills/wechat-skill-2/collect-wechat.ps1`
+- `file:///c:/Users/len/ywwu_workspace/claude_skill_learn/.claude/skills/wechat-skill/collect-wechat.ps1`
 - `file:///c:/Users/len/ywwu_workspace/claude_skill_learn/test-watcher.ts`
 
 Expected: no new diagnostics introduced by the stop-entry change.
@@ -296,16 +296,16 @@ Expected: no new diagnostics introduced by the stop-entry change.
 Run:
 
 ```bash
-git add .claude/skills/wechat-skill-2/collect-wechat.ps1 test-watcher.ts
+git add .claude/skills/wechat-skill/collect-wechat.ps1 test-watcher.ts
 git commit -m "feat: add wechat skill stop entry"
 ```
 
 ### Task 4: Update the Skill Contract and Repository Guidance
 
 **Files:**
-- Modify: `c:\Users\len\ywwu_workspace\claude_skill_learn\.claude\skills\wechat-skill-2\SKILL.md`
+- Modify: `c:\Users\len\ywwu_workspace\claude_skill_learn\.claude\skills\wechat-skill\SKILL.md`
 - Modify: `c:\Users\len\ywwu_workspace\claude_skill_learn\CLAUDE.md`
-- Test: `c:\Users\len\ywwu_workspace\claude_skill_learn\.claude\skills\wechat-skill-2\collect-wechat.ps1`
+- Test: `c:\Users\len\ywwu_workspace\claude_skill_learn\.claude\skills\wechat-skill\collect-wechat.ps1`
 
 - [ ] **Step 1: Update `SKILL.md` argument hint and usage examples**
 
@@ -318,7 +318,7 @@ argument-hint: "[--stop] [--all] [--limit N]"
 Add a stop-mode usage example under common usage:
 
 ```md
-- `/wechat-skill-2 --stop` — 停止后台 watcher 并立即退出
+- `/wechat-skill --stop` — 停止后台 watcher 并立即退出
 ```
 
 - [ ] **Step 2: Update the execution instructions and behavior contract in `SKILL.md`**
@@ -340,7 +340,7 @@ Add one contract bullet in the behavior-contract area:
 Add a repository-level reminder in the watcher contract or security/runtime section:
 
 ```md
-- **Stop entry contract:** `wechat-skill-2` supports `/wechat-skill-2 --stop` as a skill-entry control mode; this must route in `collect-wechat.ps1` before inbox import and must stay exclusive with `--all` / `--limit`
+- **Stop entry contract:** `wechat-skill` supports `/wechat-skill --stop` as a skill-entry control mode; this must route in `collect-wechat.ps1` before inbox import and must stay exclusive with `--all` / `--limit`
 ```
 
 - [ ] **Step 4: Sanity-check the user-facing stop path manually**
@@ -348,7 +348,7 @@ Add a repository-level reminder in the watcher contract or security/runtime sect
 Run:
 
 ```bash
-powershell -NoProfile -ExecutionPolicy Bypass -File .\.claude\skills\wechat-skill-2\collect-wechat.ps1 --stop
+powershell -NoProfile -ExecutionPolicy Bypass -File .\.claude\skills\wechat-skill\collect-wechat.ps1 --stop
 ```
 
 Expected one of:
@@ -377,13 +377,13 @@ Expected: the watcher suite still passes with the new stop-entry coverage includ
 
 Run diagnostics on:
 
-- `file:///c:/Users/len/ywwu_workspace/claude_skill_learn/.claude/skills/wechat-skill-2/SKILL.md`
+- `file:///c:/Users/len/ywwu_workspace/claude_skill_learn/.claude/skills/wechat-skill/SKILL.md`
 - `file:///c:/Users/len/ywwu_workspace/claude_skill_learn/CLAUDE.md`
 
 Then commit:
 
 ```bash
-git add .claude/skills/wechat-skill-2/SKILL.md CLAUDE.md
+git add .claude/skills/wechat-skill/SKILL.md CLAUDE.md
 git commit -m "docs: document wechat skill stop mode"
 ```
 
