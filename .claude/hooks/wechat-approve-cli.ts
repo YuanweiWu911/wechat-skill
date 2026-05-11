@@ -5,6 +5,7 @@ import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
 process.stdout.setDefaultEncoding("utf-8");
+process.stderr.setDefaultEncoding("utf-8");
 
 interface PendingReply {
   id: string;

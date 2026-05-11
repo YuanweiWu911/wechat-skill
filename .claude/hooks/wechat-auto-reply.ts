@@ -6,6 +6,9 @@ import { dirname, join, normalize, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 
+process.stdout.setDefaultEncoding("utf-8");
+process.stderr.setDefaultEncoding("utf-8");
+
 interface InboxEntry {
   id: string;
   messageId: string;
@@ -70,7 +73,7 @@ interface AutoReplyConfig {
   projectRoot: string;
   statePath: string;
   pendingPath: string;
-  pollMs: number;
+  cursorPath: string;
 }
 
 interface FileTransferDecision {
@@ -246,27 +249,20 @@ function savePendingReply(pendingPath: string, reply: PendingReply): void {
   appendFileSync(pendingPath, JSON.stringify(reply) + "\n", "utf-8");
 }
 
-async function safeMarkInboxRead(ids: string[], config: AutoReplyConfig): Promise<void> {
-  if (ids.length === 0) return;
-  const scriptPath = join(config.projectRoot, ".claude", "skills", "wechat-skill-2", "weixin-inbox.ps1");
+function loadCursor(cursorPath: string): string {
   try {
-    const result = spawnSync(
-      "powershell.exe",
-      ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", scriptPath, "ack", ...ids],
-      {
-        cwd: config.projectRoot,
-        encoding: "utf-8",
-        timeout: 30000,
-        env: { ...process.env, BUN_UTF8: "1" },
-      },
-    );
-    if (result.status !== 0) {
-      const stderr = (result.stderr || "").trim();
-      const stdout = (result.stdout || "").trim();
-      throw new Error(stderr || stdout || `ack exited with code ${result.status}`);
-    }
-  } catch (e) {
-    logLine(config, `markInboxRead failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+    if (!existsSync(cursorPath)) return "";
+    return readFileSync(cursorPath, "utf-8").trim();
+  } catch {
+    return "";
+  }
+}
+
+function saveCursor(cursorPath: string, cursor: string): void {
+  try {
+    writeFileSync(cursorPath, cursor, "utf-8");
+  } catch {
+    // best effort
   }
 }
 
@@ -275,22 +271,23 @@ function logLine(config: AutoReplyConfig, message: string): void {
   console.log(line);
 }
 
-function loadAccount(stateDir: string): AccountData {
+function loadAccount(stateDir: string): AccountData | null {
   const accountPath = join(stateDir, "account.json");
   if (!existsSync(accountPath)) {
-    throw new Error(`Missing Weixin account file: ${accountPath}`);
+    return null;
   }
 
-  return JSON.parse(readFileSync(accountPath, "utf-8")) as AccountData;
+  try {
+    return JSON.parse(readFileSync(accountPath, "utf-8")) as AccountData;
+  } catch {
+    return null;
+  }
 }
 
 async function importWeixinModules(pluginRoot: string) {
   const load = async <T>(relativePath: string): Promise<T> =>
     import(pathToFileURL(join(pluginRoot, relativePath)).href) as Promise<T>;
 
-  const inbox = await load<{
-    listInboxEntries(options?: { unreadOnly?: boolean; limit?: number }): InboxEntry[];
-  }>("src/inbox.ts");
   const send = await load<{
     sendText(params: {
       to: string;
@@ -311,13 +308,34 @@ async function importWeixinModules(pluginRoot: string) {
   }>("src/send.ts");
   const apiMod = await load<{
     getConfig(baseUrl: string, token: string, userId: string, contextToken?: string): Promise<{ typing_ticket?: string }>;
-    getUpdates(baseUrl: string, token: string, getUpdatesBuf: string, signal?: AbortSignal): Promise<{ ret: number; msgs?: unknown[]; get_updates_buf?: string }>;
+    getUpdates(
+      baseUrl: string,
+      token: string,
+      getUpdatesBuf: string,
+      signal?: AbortSignal,
+    ): Promise<{ ret?: number; msgs?: unknown[]; get_updates_buf?: string; errcode?: number; errmsg?: string }>;
   }>("src/api.ts");
   const accounts = await load<{
     CDN_BASE_URL: string;
+    DEFAULT_BASE_URL: string;
   }>("src/accounts.ts");
+  const pairing = await load<{
+    isAllowed(userId: string): boolean;
+    addPendingPairing(userId: string): string;
+  }>("src/pairing.ts");
+  const types = await load<{
+    MessageType: { USER: number; BOT: number; NONE: number };
+    MessageItemType: { TEXT: number; IMAGE: number; VOICE: number; FILE: number; VIDEO: number; NONE: number };
+  }>("src/types.ts");
 
-  return { ...inbox, ...send, ...accounts, getConfig: apiMod.getConfig, getUpdates: apiMod.getUpdates };
+  return {
+    ...send,
+    ...accounts,
+    ...pairing,
+    ...types,
+    getConfig: apiMod.getConfig,
+    getUpdates: apiMod.getUpdates,
+  };
 }
 
 function sanitizeReply(text: string): string {
@@ -522,7 +540,7 @@ function parseActionJson(stdout: string): ActionResult | null {
   return null;
 }
 
-function getRiskyExecRetryReason(result: { stdout: string; stderr: string; exitCode: number }): "empty_stdout" | "timeout" | null {
+function getClaudeRetryReason(result: { stdout: string; stderr: string; exitCode: number }): "empty_stdout" | "timeout" | null {
   if (!result.stdout.trim() && result.exitCode === 0) {
     return "empty_stdout";
   }
@@ -692,7 +710,7 @@ async function handleMessage(
 
     let result = callClaude(riskyStdin, config.projectRoot, true, label, config, RISKY_EXECUTE_SYSTEM_PROMPT);
     let action = parseActionJson(result.stdout);
-    const retryReason = !action ? getRiskyExecRetryReason(result) : null;
+    const retryReason = !action ? getClaudeRetryReason(result) : null;
     if (retryReason) {
       const retryDelayMs = retryReason === "timeout" ? 3000 : 2000;
       const retryNote = retryReason === "timeout"
@@ -731,11 +749,19 @@ async function handleMessage(
   logLine(config, `Classify calling claude for ${entry.id}`);
 
   let classifyResult = callClaude(classifyStdin, config.projectRoot, false, classifyLabel, config, CLASSIFY_SYSTEM_PROMPT);
+  let classifyRetryReason = !classifyResult.stdout.trim() && classifyResult.exitCode === 0
+    ? "empty_stdout"
+    : getClaudeRetryReason(classifyResult);
 
-  if (!classifyResult.stdout.trim() && classifyResult.exitCode === 0) {
-    logLine(config, `${classifyLabel} empty stdout (exit=0), retrying after 2s`);
-    await Bun.sleep(2000);
+  if (classifyRetryReason) {
+    const retryDelayMs = classifyRetryReason === "timeout" ? 3000 : 2000;
+    const retryNote = classifyRetryReason === "timeout"
+      ? `${classifyLabel} timeout detected, retrying once after ${Math.round(retryDelayMs / 1000)}s`
+      : `${classifyLabel} empty stdout (exit=0), retrying after ${Math.round(retryDelayMs / 1000)}s`;
+    logLine(config, retryNote);
+    await Bun.sleep(retryDelayMs);
     classifyResult = callClaude(classifyStdin, config.projectRoot, false, `${classifyLabel} retry`, config, CLASSIFY_SYSTEM_PROMPT);
+    classifyRetryReason = null;
   }
 
   const action = parseActionJson(classifyResult.stdout);
@@ -763,10 +789,17 @@ async function handleMessage(
     logLine(config, `Execute calling claude for ${entry.id}`);
 
     let execResult = callClaude(executeStdin, config.projectRoot, true, executeLabel, config, SAFE_EXECUTE_SYSTEM_PROMPT);
+    const executeRetryReason = !execResult.stdout.trim() && execResult.exitCode === 0
+      ? "empty_stdout"
+      : getClaudeRetryReason(execResult);
 
-    if (!execResult.stdout.trim() && execResult.exitCode === 0) {
-      logLine(config, `${executeLabel} empty stdout (exit=0), retrying after 2s`);
-      await Bun.sleep(2000);
+    if (executeRetryReason) {
+      const retryDelayMs = executeRetryReason === "timeout" ? 3000 : 2000;
+      const retryNote = executeRetryReason === "timeout"
+        ? `${executeLabel} timeout detected, retrying once after ${Math.round(retryDelayMs / 1000)}s`
+        : `${executeLabel} empty stdout (exit=0), retrying after ${Math.round(retryDelayMs / 1000)}s`;
+      logLine(config, retryNote);
+      await Bun.sleep(retryDelayMs);
       execResult = callClaude(executeStdin, config.projectRoot, true, `${executeLabel} retry`, config, SAFE_EXECUTE_SYSTEM_PROMPT);
     }
 
@@ -948,7 +981,6 @@ async function finalizeAction(
     const sent = await sendActionReply(action, entry.fromUserId, entry.contextToken || "", wrappedSendText, wrappedSendMediaFile);
     if (sent) {
       advanceState(config, entry.id, "replied", failCount);
-      await safeMarkInboxRead([entry.id], config);
       logLine(config, `Sent ${action.type}: "${action.reply.slice(0, 80)}"`);
     }
     return;
@@ -959,7 +991,6 @@ async function finalizeAction(
     await wrappedSendText({ to: entry.fromUserId, text: askMsg, contextToken: entry.contextToken || "" });
     logLine(config, `Risk warn sent: "${action.warning.slice(0, 80)}"`);
     advanceState(config, entry.id, "replied", failCount, action);
-    await safeMarkInboxRead([entry.id], config);
     saveState(config.statePath, {
       ...loadState(config.statePath),
       pendingConfirmation: {
@@ -978,259 +1009,79 @@ async function finalizeAction(
   const newFailCount = failCount + 1;
   logLine(config, `Failed (attempt ${newFailCount}/${MAX_CLASSIFY_RETRIES}): ${action.reason}`);
 
-  if (newFailCount <= MAX_CLASSIFY_RETRIES) {
-    // Retry: reset to classifying so next poll picks it up
-    advanceState(config, entry.id, "classifying", newFailCount);
-    logLine(config, `Will retry ${entry.id} on next poll cycle`);
-    return; // Don't mark inbox-read — message stays unread for retry
-  }
-
-  // Exhausted retries → send fallback chat reply
+  // No inbox backpressure in MCP channel mode — do retries inline, then fallback.
   const fallback = fallbackReply(entry.text);
   logLine(config, `Fallback for ${entry.id}: "${fallback.slice(0, 80)}"`);
   const sent = await wrappedSendText({ to: entry.fromUserId, text: fallback, contextToken: entry.contextToken || "" });
   if (sent) {
     advanceState(config, entry.id, "replied", newFailCount);
-    await safeMarkInboxRead([entry.id], config);
   } else {
     // Can't even send fallback → dead letter
     advanceState(config, entry.id, "dead", newFailCount);
-    await safeMarkInboxRead([entry.id], config);
     logLine(config, `Moving to dead-letter (send failed): ${entry.id}`);
     const newDead = [...(state.deadLetterIds || []), entry.id].slice(-200);
     saveState(config.statePath, { ...state, deadLetterIds: newDead });
   }
 }
 
-/** On startup, recover messages stuck in transient states (crash recovery). */
-function recoverStaleStates(config: AutoReplyConfig): InboxEntry[] {
-  const state = loadState(config.statePath);
-  const now = Date.now();
-  const staleIds: string[] = [];
-
-  for (const [id, lifecycle] of Object.entries(state.messageStates)) {
-    if (lifecycle.status === "replied" || lifecycle.status === "dead") continue;
-    const elapsed = now - new Date(lifecycle.lastAttemptAt).getTime();
-    if (elapsed > CLASSIFY_TTL_MS) {
-      staleIds.push(id);
-      logLine(config, `Recover stale: ${id} status=${lifecycle.status} elapsed=${Math.round(elapsed / 1000)}s`);
-    }
-  }
-
-  if (staleIds.length === 0) return [];
-
-  const allEntries = readInboxEntriesSync();
-  return allEntries.filter((e: InboxEntry) => staleIds.includes(e.id));
-}
-
-/** Direct inbox.jsonl reader (synchronous — used for stale recovery during startup). */
-function dedupeInboxEntries(entries: InboxEntry[]): InboxEntry[] {
-  const seen = new Set<string>();
-  const unique: InboxEntry[] = [];
-  for (const entry of entries) {
-    if (seen.has(entry.id)) continue;
-    seen.add(entry.id);
-    unique.push(entry);
-  }
-  return unique;
-}
-
-function readInboxEntriesSync(): InboxEntry[] {
-  const stateDir = resolveWeixinStateDir();
-  const p = join(stateDir, "inbox.jsonl");
-  if (!existsSync(p)) return [];
-  return dedupeInboxEntries(readFileSync(p, "utf-8")
-    .split("\n")
-    .map((line: string) => line.trim())
-    .filter(Boolean)
-    .flatMap((line: string) => {
-      try { return [JSON.parse(line) as InboxEntry]; } catch { return []; }
-    }));
-}
-
-function rankUnreadEntry(entry: InboxEntry, state: AutoReplyState): number {
-  const lifecycle = state.messageStates[entry.id];
-  if (lifecycle && (lifecycle.status === "replied" || lifecycle.status === "dead")) {
-    return 99;
-  }
-
-  const deadLetter = new Set(state.deadLetterIds || []);
-  if (deadLetter.has(entry.id)) {
-    return 99;
-  }
-
-  if (shouldSkip(entry)) {
-    return 99;
-  }
-
-  const pc = state.pendingConfirmation;
-  if (pc && entry.fromUserId === pc.chatId) {
-    return 0;
-  }
-
-  if (!lifecycle) {
-    return 1;
-  }
-
-  return 2;
-}
-
-async function processUnreadMessages(config: AutoReplyConfig): Promise<number> {
-  if (processing) return 0;
+async function handleIncomingMessage(
+  config: AutoReplyConfig,
+  entry: InboxEntry,
+  wrappedSendText: (params: { to: string; text: string; contextToken: string }) => Promise<boolean>,
+  wrappedSendMediaFile: (params: { to: string; filePath: string; text: string; contextToken: string }) => Promise<boolean>,
+): Promise<void> {
+  if (processing) return;
   processing = true;
-
   try {
-  const pluginRoot = resolveWeixinPluginRoot();
-  const stateDir = resolveWeixinStateDir();
-  const account = loadAccount(stateDir);
-
-  let listInboxEntries: (opts?: { unreadOnly?: boolean; limit?: number }) => InboxEntry[];
-  let sendText: any;
-  let sendMediaFile: any;
-  let CDN_BASE_URL: string;
-  let getUpdates: any;
-
-  for (let retry = 0; retry < 5; retry++) {
-    try {
-      const mods = await importWeixinModules(pluginRoot);
-      listInboxEntries = mods.listInboxEntries;
-      sendText = mods.sendText;
-      sendMediaFile = mods.sendMediaFile;
-      CDN_BASE_URL = mods.CDN_BASE_URL;
-      getUpdates = mods.getUpdates;
-      break;
-    } catch (e) {
-      if (retry < 4) {
-        logLine(config, `importWeixinModules EPERM, retry ${retry + 1}/5`);
-        await Bun.sleep(2000);
-      } else {
-        logLine(config, `importWeixinModules failed after 5 retries: ${e instanceof Error ? e.message : String(e)}`);
-        process.exit(2);
-      }
-    }
-  }
-
-  const wrappedSendText = (params: { to: string; text: string; contextToken: string }) =>
-    safeSendText(sendText, account, getUpdates, config, params, 2);
-  const wrappedSendMediaFile = (params: { to: string; filePath: string; text: string; contextToken: string }) =>
-    safeSendMediaFile(sendMediaFile, account, getUpdates, config, { ...params, cdnBaseUrl: CDN_BASE_URL }, 2);
-
-  const state = loadState(config.statePath);
-
-  // --- Stale-state recovery: retry messages stuck by a prior crash ---
-  const staleEntries = recoverStaleStates(config);
-  for (const entry of staleEntries) {
-    const lifecycle = state.messageStates[entry.id];
-    logLine(config, `Recovery retry: ${entry.id} status=${lifecycle.status} fail=${lifecycle.failCount}`);
-    // If we have a cached action (classified before crash), send it directly
-    if (lifecycle.cachedAction && (lifecycle.cachedAction.type === "chat" || lifecycle.cachedAction.type === "executed")) {
-      const a = lifecycle.cachedAction;
-      const sent = await sendActionReply(a, entry.fromUserId, entry.contextToken || "", wrappedSendText, wrappedSendMediaFile);
-      if (sent) {
-        advanceState(config, entry.id, "replied", lifecycle.failCount);
-        await safeMarkInboxRead([entry.id], config);
-        logLine(config, `Recovery sent cached: ${entry.id}`);
-      }
-      continue;
-    }
-    // Otherwise re-process from scratch
-    advanceState(config, entry.id, "classifying", lifecycle.failCount);
-    const action = await handleMessage(entry, wrappedSendText, config);
-    await finalizeAction(config, entry, action, wrappedSendText, wrappedSendMediaFile);
-  }
-
-  let unreadEntries: InboxEntry[] = [];
-  for (let retry = 0; retry < 3; retry++) {
-    try {
-      unreadEntries = dedupeInboxEntries(listInboxEntries({ unreadOnly: true, limit: 100 }).reverse());
-      break;
-    } catch (e) {
-      if (retry < 2) {
-        logLine(config, `listInboxEntries EPERM, retry ${retry + 1}/3`);
-        await Bun.sleep(3000);
-      } else {
-        logLine(config, `listInboxEntries failed: ${e instanceof Error ? e.message : String(e)}`);
-        return 0;
-      }
-    }
-  }
-  let replied = 0;
-  const prioritizedEntries = unreadEntries
-    .map((entry, index) => ({ entry, index, rank: rankUnreadEntry(entry, state) }))
-    .filter((item) => item.rank < 99)
-    .sort((a, b) => a.rank - b.rank || a.index - b.index)
-    .map((item) => item.entry);
-
-  for (const entry of prioritizedEntries) {
     const currentState = loadState(config.statePath);
     const lifecycle = currentState.messageStates[entry.id];
     const deadLetter = new Set(currentState.deadLetterIds || []);
     const pc = currentState.pendingConfirmation;
 
-    if (lifecycle && (lifecycle.status === "replied" || lifecycle.status === "dead")) {
-      continue;
-    }
-    if (shouldSkip(entry)) {
-      continue;
-    }
+    if (lifecycle && (lifecycle.status === "replied" || lifecycle.status === "dead")) return;
     if (deadLetter.has(entry.id)) {
-      logLine(config, `Skipping dead-letter: ${entry.id}`);
       advanceState(config, entry.id, "dead");
-      continue;
+      return;
     }
+    if (shouldSkip(entry)) return;
 
-    // --- BRANCH A: Reply to a pending risky-confirmation ---
     if (pc && entry.fromUserId === pc.chatId) {
-      if (entry.id === pc.inboxId) {
-        logLine(config, `Ignoring original risky message while pending confirmation: ${entry.id}`);
-        await safeMarkInboxRead([entry.id], config);
-        continue;
-      }
-
       if (isConfirmReply(entry.text)) {
         logLine(config, `Risk confirm YES for "${pc.pendingAction.slice(0, 60)}"`);
-
         const action = await handleMessage(entry, wrappedSendText, config, {
           originalText: pc.pendingAction,
           command: pc.replyText || pc.pendingAction,
         });
 
         if (action.type === "executed" || action.type === "chat") {
-          await sendActionReply(action, entry.fromUserId, entry.contextToken || pc.contextToken || "", wrappedSendText, wrappedSendMediaFile);
-          logLine(config, `Risk executed for ${pc.inboxId}: "${action.reply.slice(0, 80)}"`);
+          await sendActionReply(
+            action,
+            entry.fromUserId,
+            entry.contextToken || pc.contextToken || "",
+            wrappedSendText,
+            wrappedSendMediaFile,
+          );
         } else if (action.type === "failed") {
           await wrappedSendText({ to: entry.fromUserId, text: `执行失败：${action.reason}`, contextToken: entry.contextToken || "" });
         }
 
         advanceState(config, entry.id, "replied");
-        await safeMarkInboxRead([entry.id], config);
         saveState(config.statePath, { ...loadState(config.statePath), pendingConfirmation: undefined });
-        replied++;
-        continue;
+        return;
       }
 
       if (isDenyReply(entry.text)) {
         await wrappedSendText({ to: entry.fromUserId, text: "好的，已取消。", contextToken: entry.contextToken || "" });
         advanceState(config, entry.id, "replied");
-        await safeMarkInboxRead([entry.id], config);
         saveState(config.statePath, { ...loadState(config.statePath), pendingConfirmation: undefined });
-        replied++;
-        logLine(config, `Risk deny for "${pc.pendingAction.slice(0, 60)}"`);
-        continue;
+        return;
       }
 
-      // Not a confirm/deny — clear old pending, treat as new message
       logLine(config, `Non-confirm while risky-pending; treating as new request`);
       saveState(config.statePath, { ...currentState, pendingConfirmation: undefined });
     }
 
-    // --- BRANCH B: New message → classify (state machine) ---
-    if (lifecycle && lifecycle.status !== "replied" && lifecycle.status !== "dead") {
-      logLine(config, `Retry deferred behind fresh messages: ${entry.id} status=${lifecycle.status} fail=${lifecycle.failCount}`);
-    }
     logLine(config, `Processing: ${entry.id} text="${entry.text.slice(0, 80)}"`);
-
-    // Mark as classifying BEFORE calling LLM — crash recovery can detect this
     advanceState(config, entry.id, "classifying");
 
     let action: ActionResult;
@@ -1241,28 +1092,164 @@ async function processUnreadMessages(config: AutoReplyConfig): Promise<number> {
       action = { type: "failed", reason: "LLM调用异常" };
     }
 
-    // Cache successful classification results in the state for crash recovery
+    if (action.type === "failed") {
+      for (let i = 0; i < MAX_CLASSIFY_RETRIES; i++) {
+        logLine(config, `Retry classify ${entry.id} ${i + 1}/${MAX_CLASSIFY_RETRIES}`);
+        advanceState(config, entry.id, "classifying", i + 1);
+        try {
+          action = await handleMessage(entry, wrappedSendText, config);
+        } catch {
+          action = { type: "failed", reason: "LLM调用异常" };
+        }
+        if (action.type !== "failed") break;
+      }
+    }
+
     if (action.type === "chat" || action.type === "executed" || action.type === "risky") {
       advanceState(config, entry.id, "classified", 0, action);
     }
 
     await finalizeAction(config, entry, action, wrappedSendText, wrappedSendMediaFile);
-    replied++;
-    break; // ONE reply per poll cycle
-  }
-
-  const finalState = loadState(config.statePath);
-  saveState(config.statePath, {
-    messageStates: finalState.messageStates,
-    deadLetterIds: finalState.deadLetterIds || [],
-    pendingConfirmation: finalState.pendingConfirmation || undefined,
-    lastStartedAt: state.lastStartedAt || new Date().toISOString(),
-  });
-
-  return replied;
   } finally {
     processing = false;
   }
+}
+
+async function startWeixinPollLoop(params: {
+  config: AutoReplyConfig;
+  account: AccountData;
+  baseUrl: string;
+  token: string;
+  messageTypeUser: number;
+  itemTypeText: number;
+  itemTypeVoice: number;
+  itemTypeImage: number;
+  itemTypeFile: number;
+  itemTypeVideo: number;
+  isAllowed: (userId: string) => boolean;
+  addPendingPairing: (userId: string) => string;
+  getUpdates: (baseUrl: string, token: string, getUpdatesBuf: string, signal?: AbortSignal) => Promise<any>;
+  onEntry: (entry: InboxEntry) => Promise<void>;
+  abortSignal: AbortSignal;
+  wrappedSendText: (params: { to: string; text: string; contextToken: string }) => Promise<boolean>;
+}): Promise<void> {
+  const {
+    config,
+    account,
+    baseUrl,
+    token,
+    messageTypeUser,
+    itemTypeText,
+    itemTypeVoice,
+    itemTypeImage,
+    itemTypeFile,
+    itemTypeVideo,
+    isAllowed,
+    addPendingPairing,
+    getUpdates,
+    onEntry,
+    abortSignal,
+    wrappedSendText,
+  } = params;
+
+  let cursor = loadCursor(config.cursorPath);
+  let consecutiveErrors = 0;
+  const contextTokens = new Map<string, string>();
+
+  logLine(config, `Weixin poll loop started (cursor="${cursor.slice(0, 16)}")`);
+
+  while (!abortSignal.aborted) {
+    try {
+      const resp = await getUpdates(baseUrl, token, cursor, abortSignal);
+
+      if (resp?.errcode === -14) {
+        logLine(config, "Weixin session expired (errcode=-14), backing off 30s");
+        await Bun.sleep(30000);
+        continue;
+      }
+
+      if (resp?.ret !== 0 && resp?.ret !== undefined) {
+        throw new Error(`getUpdates error: ret=${resp.ret} errcode=${resp.errcode ?? ""} ${resp.errmsg ?? ""}`.trim());
+      }
+
+      consecutiveErrors = 0;
+
+      if (typeof resp?.get_updates_buf === "string") {
+        cursor = resp.get_updates_buf;
+        saveCursor(config.cursorPath, cursor);
+      }
+
+      const msgs: any[] = Array.isArray(resp?.msgs) ? resp.msgs : [];
+      for (const msg of msgs) {
+        if (!msg || msg.message_type !== messageTypeUser) continue;
+        const fromUserId = msg.from_user_id;
+        if (!fromUserId) continue;
+
+        const contextToken = typeof msg.context_token === "string" ? msg.context_token : "";
+        if (contextToken) {
+          contextTokens.set(fromUserId, contextToken);
+        }
+
+        if (!isAllowed(fromUserId)) {
+          const code = addPendingPairing(fromUserId);
+          await wrappedSendText({
+            to: fromUserId,
+            text: `Your pairing code is: ${code}\n\nAsk the operator to confirm:\n/weixin-access pair ${code}`,
+            contextToken,
+          });
+          continue;
+        }
+
+        let textContent = "";
+        let hasAttachment = false;
+        const items: any[] = Array.isArray(msg.item_list) ? msg.item_list : [];
+        for (const item of items) {
+          if (item?.type === itemTypeText && item?.text_item?.text) {
+            textContent += (textContent ? "\n" : "") + String(item.text_item.text);
+            continue;
+          }
+          if (item?.type === itemTypeVoice && item?.voice_item?.text) {
+            textContent += (textContent ? "\n" : "") + `[Voice transcription]: ${String(item.voice_item.text)}`;
+            continue;
+          }
+          if (item?.type === itemTypeImage || item?.type === itemTypeFile || item?.type === itemTypeVideo || item?.type === itemTypeVoice) {
+            hasAttachment = true;
+          }
+        }
+
+        if (!textContent && hasAttachment) {
+          textContent = "(media attachment)";
+        }
+        if (!textContent) continue;
+
+        const messageId = String(msg.message_id || "");
+        const id = messageId ? `msg:${messageId}` : `msg:${Date.now()}:${Math.random().toString(16).slice(2)}`;
+        const receivedAt = msg.create_time_ms ? new Date(Number(msg.create_time_ms)).toISOString() : new Date().toISOString();
+        const effectiveContextToken = contextToken || contextTokens.get(fromUserId) || "";
+
+        await onEntry({
+          id,
+          messageId,
+          fromUserId,
+          receivedAt,
+          text: textContent,
+          contextToken: effectiveContextToken,
+        });
+      }
+    } catch (err: unknown) {
+      if (abortSignal.aborted) break;
+      consecutiveErrors++;
+      logLine(config, `Weixin poll error (${consecutiveErrors}): ${err instanceof Error ? err.message : String(err)}`);
+      if (consecutiveErrors >= 3) {
+        await Bun.sleep(30000);
+        consecutiveErrors = 0;
+      } else {
+        await Bun.sleep(2000);
+      }
+    }
+  }
+
+  logLine(config, "Weixin poll loop stopped.");
 }
 
 async function main(): Promise<void> {
@@ -1274,7 +1261,7 @@ async function main(): Promise<void> {
     projectRoot,
     statePath: join(claudeDir, "wechat-auto-state.json"),
     pendingPath: join(claudeDir, "wechat-auto-pending.jsonl"),
-    pollMs: DEFAULT_POLL_MS,
+    cursorPath: join(claudeDir, "wechat-auto-cursor.txt"),
   };
 
   const initialState = loadState(config.statePath);
@@ -1295,17 +1282,92 @@ async function main(): Promise<void> {
   }
   logLine(config, `claude CLI available: ${claudeCheck.stdout.trim().slice(0, 80)}`);
 
-  do {
+  const pluginRoot = resolveWeixinPluginRoot();
+  const stateDir = resolveWeixinStateDir();
+  const account = loadAccount(stateDir);
+  if (!account) {
+    logLine(config, `WeChat not connected. Run /weixin:configure first. (missing ${join(stateDir, "account.json")})`);
+    process.exit(0);
+  }
+
+  let sendText: any;
+  let sendMediaFile: any;
+  let CDN_BASE_URL: string;
+  let DEFAULT_BASE_URL: string;
+  let getUpdates: any;
+  let isAllowed: any;
+  let addPendingPairing: any;
+  let MessageType: any;
+  let MessageItemType: any;
+
+  for (let retry = 0; retry < 5; retry++) {
     try {
-      await processUnreadMessages(config);
-    } catch (e) {
-      logLine(config, `Poll cycle error: ${e instanceof Error ? e.message : String(e)}`);
-    }
-    if (once) {
+      const mods = await importWeixinModules(pluginRoot);
+      sendText = mods.sendText;
+      sendMediaFile = mods.sendMediaFile;
+      CDN_BASE_URL = mods.CDN_BASE_URL;
+      DEFAULT_BASE_URL = mods.DEFAULT_BASE_URL;
+      getUpdates = mods.getUpdates;
+      isAllowed = mods.isAllowed;
+      addPendingPairing = mods.addPendingPairing;
+      MessageType = mods.MessageType;
+      MessageItemType = mods.MessageItemType;
       break;
+    } catch (e) {
+      if (retry < 4) {
+        logLine(config, `importWeixinModules EPERM, retry ${retry + 1}/5`);
+        await Bun.sleep(2000);
+      } else {
+        logLine(config, `importWeixinModules failed after 5 retries: ${e instanceof Error ? e.message : String(e)}`);
+        process.exit(2);
+      }
     }
-    await Bun.sleep(config.pollMs);
-  } while (true);
+  }
+
+  const baseUrl = account.baseUrl || DEFAULT_BASE_URL || "https://ilinkai.weixin.qq.com";
+  const wrappedSendText = (params: { to: string; text: string; contextToken: string }) =>
+    safeSendText(sendText, account, getUpdates, config, params, 2);
+  const wrappedSendMediaFile = (params: { to: string; filePath: string; text: string; contextToken: string }) =>
+    safeSendMediaFile(sendMediaFile, account, getUpdates, config, { ...params, cdnBaseUrl: CDN_BASE_URL }, 2);
+
+  await warmupApiSession(account, getUpdates, config);
+
+  const controller = new AbortController();
+  const shutdown = () => {
+    if (!controller.signal.aborted) {
+      logLine(config, "Shutdown requested, stopping...");
+      controller.abort();
+    }
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+  process.on("SIGHUP", shutdown);
+
+  let received = 0;
+  await startWeixinPollLoop({
+    config,
+    account,
+    baseUrl,
+    token: account.token,
+    messageTypeUser: MessageType.USER,
+    itemTypeText: MessageItemType.TEXT,
+    itemTypeVoice: MessageItemType.VOICE,
+    itemTypeImage: MessageItemType.IMAGE,
+    itemTypeFile: MessageItemType.FILE,
+    itemTypeVideo: MessageItemType.VIDEO,
+    isAllowed,
+    addPendingPairing,
+    getUpdates,
+    abortSignal: controller.signal,
+    wrappedSendText,
+    onEntry: async (entry) => {
+      received++;
+      await handleIncomingMessage(config, entry, wrappedSendText, wrappedSendMediaFile);
+      if (once && received > 0) {
+        shutdown();
+      }
+    },
+  });
 }
 
 await main();

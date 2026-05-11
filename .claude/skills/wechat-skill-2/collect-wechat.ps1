@@ -10,16 +10,11 @@ $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $PSDefaultParameterValues['*:Encoding'] = 'utf8'
 $env:BUN_UTF8 = "1"
 
-$weixinInboxScript = Join-Path $PSScriptRoot "weixin-inbox.ps1"
 $startWatcherScript = Join-Path $PSScriptRoot "..\..\hooks\start-wechat-auto.ps1"
 $stopWatcherScript = Join-Path $PSScriptRoot "..\..\hooks\stop-wechat-auto.ps1"
 $runnerLauncherPath = Join-Path $PSScriptRoot "..\..\hooks\start-wechat-auto-runner.ps1"
 $pidPath = Join-Path $PSScriptRoot "..\..\wechat-auto.pid"
 $projectRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..\..")
-
-if (-not (Test-Path $weixinInboxScript)) {
-  throw "Missing weixin-inbox.ps1 at $weixinInboxScript"
-}
 
 if (-not (Test-Path $startWatcherScript)) {
   throw "Missing start-wechat-auto.ps1 at $startWatcherScript"
@@ -204,28 +199,12 @@ if ($stopRequested) {
   exit 0
 }
 
-$copyOutput = & $weixinInboxScript copy @normalizedArgs 2>&1
-$copyExit = $LASTEXITCODE
-
-$exportOutput = & $weixinInboxScript export @normalizedArgs 2>&1
-$exportExit = $LASTEXITCODE
-
-if ($copyExit -ne 0 -and $exportExit -ne 0) {
-  throw "Both clipboard copy and export failed.`nCopy output:`n$copyOutput`n`nExport output:`n$exportOutput"
-}
-
-Write-Output "WeChat Skill 2.0 sync"
-Write-Output ""
-
-if ($copyExit -eq 0) {
-  Write-Output "Clipboard:"
-  Write-Output $copyOutput
+if (Test-WatcherRunning) {
+  Write-Output $watcherAlreadyRunningMessage
 } else {
-  Write-Output "Clipboard:"
-  Write-Output "Copy failed, but export is still available."
-  Write-Output $copyOutput
+  Write-Output $watcherNotRunningMessage
 }
 
 Write-Output ""
-Write-Output "Imported messages:"
-Write-Output $exportOutput
+Write-Output "cc-weixin now uses MCP channel push: messages arrive as <channel source=weixin ...> directly in the chat context."
+Write-Output "Inbox import/sync is deprecated."

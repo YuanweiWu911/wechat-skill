@@ -4,6 +4,11 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$PSDefaultParameterValues['*:Encoding'] = 'utf8'
+$env:BUN_UTF8 = "1"
 $projectRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..\..")
 $cliPath = Join-Path $projectRoot ".claude\hooks\wechat-approve-cli.ts"
 

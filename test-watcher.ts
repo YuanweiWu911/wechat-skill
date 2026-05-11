@@ -430,7 +430,7 @@ function applyRiskConfirmStateExpected(state: QueueState, confirmEntry: QueueEnt
   };
 }
 
-function getRiskyExecRetryReasonForTest(result: ClaudeRunResultForTest): "empty_stdout" | "timeout" | null {
+function getClaudeRetryReasonForTest(result: ClaudeRunResultForTest): "empty_stdout" | "timeout" | null {
   const stderrText = `${result.stderr}\n${result.error || ""}`;
   if (!result.stdout.trim() && result.status === 0) {
     return "empty_stdout";
@@ -654,10 +654,23 @@ function runScriptTests(): TestResult[] {
     wechatApprove.status === 0 ? "PASS" : "FAIL",
     wechatApprove.stdout || wechatApprove.stderr || wechatApprove.error || "无输出",
   );
+  const wechatApproveScript = readFileSync(join(skillDir, "wechat-approve.ps1"), "utf-8");
+  const hasUtf8Header =
+    wechatApproveScript.includes("[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)") &&
+    wechatApproveScript.includes("[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)") &&
+    wechatApproveScript.includes("$OutputEncoding = [System.Text.UTF8Encoding]::new($false)") &&
+    wechatApproveScript.includes("$PSDefaultParameterValues['*:Encoding'] = 'utf8'");
+  push(
+    results,
+    "wechat-approve.ps1 normalizes PowerShell UTF-8 I/O",
+    hasUtf8Header ? "PASS" : "FAIL",
+    hasUtf8Header
+      ? "脚本入口已显式统一 Input/OutputEncoding 和默认文件编码"
+      : "脚本入口缺少 UTF-8 编码初始化，当前终端 OutputEncoding=gb2312 / $OutputEncoding=us-ascii 时容易出现中文乱码",
+  );
 
   const inboxList = runCommand(
     "powershell",
-    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", join(skillDir, "weixin-inbox.ps1"), "list", "--limit", "1"],
     { timeout: 45000 },
   );
   push(
@@ -1223,8 +1236,28 @@ function runRiskTests(): TestResult[] {
   );
   push(
     results,
+    "classify timeout should trigger retry",
+    getClaudeRetryReasonForTest({
+      status: -1,
+      stdout: "",
+      stderr: "claude timed out after 120000ms\nspawnSync claude ETIMEDOUT",
+    }) === "timeout" ? "PASS" : "FAIL",
+    "chat/executed/risky 的第一阶段分类都共用 Claude 调用，瞬时 ETIMEDOUT 时应像 risky 一样立即本地重试一次",
+  );
+  push(
+    results,
+    "execute timeout should trigger retry",
+    getClaudeRetryReasonForTest({
+      status: -1,
+      stdout: "",
+      stderr: "claude timed out after 120000ms\nspawnSync claude ETIMEDOUT",
+    }) === "timeout" ? "PASS" : "FAIL",
+    "安全执行阶段与 risky exec 一样会调用 Claude，超时也应命中统一重试判定",
+  );
+  push(
+    results,
     "risky exec timeout should trigger retry",
-    getRiskyExecRetryReasonForTest({
+    getClaudeRetryReasonForTest({
       status: -1,
       stdout: "",
       stderr: "claude timed out after 120000ms\nspawnSync claude ETIMEDOUT",
@@ -1234,7 +1267,7 @@ function runRiskTests(): TestResult[] {
   push(
     results,
     "risky exec empty stdout should still retry",
-    getRiskyExecRetryReasonForTest({
+    getClaudeRetryReasonForTest({
       status: 0,
       stdout: "",
       stderr: "",
@@ -1244,7 +1277,7 @@ function runRiskTests(): TestResult[] {
   push(
     results,
     "risky exec non-timeout failure should not retry",
-    getRiskyExecRetryReasonForTest({
+    getClaudeRetryReasonForTest({
       status: 1,
       stdout: "",
       stderr: "permission denied",

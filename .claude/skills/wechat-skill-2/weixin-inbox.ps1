@@ -10,21 +10,20 @@ $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $PSDefaultParameterValues['*:Encoding'] = 'utf8'
 $env:BUN_UTF8 = "1"
 
-$pluginRoot = "C:\Users\len\.claude\plugins\cache\cc-weixin\weixin\0.2.0"
-
-if (-not (Test-Path $pluginRoot)) {
-  throw "Weixin plugin is not installed at the expected path."
+$subcommand = ""
+if ($InboxArgs -and $InboxArgs.Count -gt 0) {
+  $subcommand = $InboxArgs[0]
 }
 
-if ($InboxArgs.Count -eq 0) {
-  $InboxArgs = @("list")
+if ($subcommand -eq "ack") {
+  exit 0
 }
 
-Push-Location $pluginRoot
-try {
-  & bun src/cli-inbox.ts @InboxArgs
-  exit $LASTEXITCODE
+if ($subcommand -eq "copy") {
+  Write-Output ""
+  exit 0
 }
-finally {
-  Pop-Location
-}
+
+Write-Output "cc-weixin now uses MCP channel push mode; cli-inbox/inbox import is deprecated."
+Write-Output "Messages arrive as <channel source=weixin ...> directly in the chat context. No inbox sync needed."
+exit 0
