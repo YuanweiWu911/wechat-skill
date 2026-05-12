@@ -4,7 +4,7 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSyn
 import { homedir } from "node:os";
 import { dirname, join, normalize, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 
 process.stdout.setDefaultEncoding("utf-8");
 process.stderr.setDefaultEncoding("utf-8");
@@ -404,16 +404,65 @@ type ActionResult =
   | { type: "risky"; warning: string; command: string }
   | { type: "failed"; reason: string };
 
-function callClaude(
+type ClaudeStage = "classify" | "execute" | "risky_execute";
+
+function getClaudeTimeoutMs(stage: ClaudeStage): number {
+  const envKey =
+    stage === "classify"
+      ? "WECHAT_CLAUDE_TIMEOUT_CLASSIFY_MS"
+      : stage === "execute"
+        ? "WECHAT_CLAUDE_TIMEOUT_EXECUTE_MS"
+        : "WECHAT_CLAUDE_TIMEOUT_RISKY_MS";
+  const fallback = stage === "classify" ? 120000 : 600000;
+  const stageRaw = Number.parseInt(process.env[envKey] || "", 10);
+  if (Number.isFinite(stageRaw) && stageRaw > 0) {
+    return stageRaw;
+  }
+
+  const legacyRaw = Number.parseInt(process.env.API_TIMEOUT_MS || "", 10);
+  return Number.isFinite(legacyRaw) && legacyRaw > 0 ? legacyRaw : fallback;
+}
+
+function killClaudeProcessTree(pid: number, config: AutoReplyConfig, logLabel: string): void {
+  if (!Number.isFinite(pid) || pid <= 0) {
+    return;
+  }
+
+  try {
+    if (process.platform === "win32") {
+      const kill = spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], {
+        encoding: "utf-8",
+        timeout: 15000,
+        windowsHide: true,
+      });
+      if (kill.status !== 0) {
+        const stderr = (kill.stderr || "").trim();
+        if (stderr && !/not found|没有运行的任务|no running instance/i.test(stderr)) {
+          logLine(config, `${logLabel} taskkill failed: ${stderr.slice(0, 160)}`);
+        }
+      }
+      return;
+    }
+
+    process.kill(pid, "SIGKILL");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/not found|ESRCH/i.test(message)) {
+      logLine(config, `${logLabel} kill failed: ${message.slice(0, 160)}`);
+    }
+  }
+}
+
+async function callClaude(
   prompt: string,
   projectRoot: string,
   withTools: boolean,
   logLabel: string,
   config: AutoReplyConfig,
+  stage: ClaudeStage,
   systemPrompt?: string,
-): { stdout: string; stderr: string; exitCode: number } {
-  const timeoutMsRaw = Number.parseInt(process.env.API_TIMEOUT_MS || "", 10);
-  const timeoutMs = Number.isFinite(timeoutMsRaw) && timeoutMsRaw > 0 ? timeoutMsRaw : 120000;
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  const timeoutMs = getClaudeTimeoutMs(stage);
   const claudeExecutable = resolveClaudeExecutable();
   const args: string[] = [
     "--permission-mode", "bypassPermissions",
@@ -426,47 +475,102 @@ function callClaude(
     args.push("--tools", "Bash,Read,Write,WebSearch,WebFetch,Glob,Grep");
   }
 
-  let stdout: string;
-  let stderr: string;
-  let exitCode: number;
-
   try {
-    const result = spawnSync(claudeExecutable, args, {
-      encoding: "utf-8",
-      cwd: projectRoot,
-      timeout: timeoutMs,
-      input: prompt,
-      env: {
-        ...process.env,
-        ANTHROPIC_MODEL: process.env.ANTHROPIC_MODEL_WATCHER || "claude-haiku-4-5-20251001",
-      },
+    const result = await new Promise<{ stdout: string; stderr: string; exitCode: number; signal: NodeJS.Signals | null }>((resolve) => {
+      const child = spawn(claudeExecutable, args, {
+        cwd: projectRoot,
+        stdio: ["pipe", "pipe", "pipe"],
+        windowsHide: true,
+        env: {
+          ...process.env,
+          ANTHROPIC_MODEL: process.env.ANTHROPIC_MODEL_WATCHER || "claude-haiku-4-5-20251001",
+        },
+      });
+
+      let stdout = "";
+      let stderr = "";
+      let settled = false;
+
+      child.stdout?.setEncoding("utf-8");
+      child.stderr?.setEncoding("utf-8");
+      child.stdout?.on("data", (chunk: string) => {
+        stdout += chunk;
+      });
+      child.stderr?.on("data", (chunk: string) => {
+        stderr += chunk;
+      });
+
+      const finalize = (payload: { stdout: string; stderr: string; exitCode: number; signal: NodeJS.Signals | null }) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timeoutHandle);
+        resolve({
+          stdout: payload.stdout.trim(),
+          stderr: payload.stderr.trim(),
+          exitCode: payload.exitCode,
+          signal: payload.signal,
+        });
+      };
+
+      const timeoutHandle = setTimeout(() => {
+        const timeoutStderr = stderr
+          ? `claude timed out after ${timeoutMs}ms\n${stderr}\nspawn claude ETIMEDOUT`
+          : `claude timed out after ${timeoutMs}ms\nspawn claude ETIMEDOUT`;
+        if (child.pid) {
+          killClaudeProcessTree(child.pid, config, logLabel);
+        }
+        finalize({
+          stdout,
+          stderr: timeoutStderr,
+          exitCode: -1,
+          signal: "SIGTERM",
+        });
+      }, timeoutMs);
+
+      child.once("error", (error) => {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        finalize({
+          stdout,
+          stderr: stderr ? `${stderr}\n${errorMsg}` : errorMsg,
+          exitCode: 1,
+          signal: null,
+        });
+      });
+
+      child.once("close", (code, signal) => {
+        finalize({
+          stdout,
+          stderr,
+          exitCode: code ?? -1,
+          signal,
+        });
+      });
+
+      child.stdin?.on("error", () => {});
+      child.stdin?.end(prompt, "utf-8");
     });
-    stdout = (result.stdout || "").trim();
-    stderr = (result.stderr || "").trim();
-    exitCode = result.status ?? -1;
 
-    if (result.error) {
-      const errorMsg = result.error instanceof Error ? result.error.message : String(result.error);
-      stderr = stderr ? `${stderr}\n${errorMsg}` : errorMsg;
-      if ((result.error as NodeJS.ErrnoException).code === "ETIMEDOUT") {
-        stderr = `claude timed out after ${timeoutMs}ms${stderr ? `\n${stderr}` : ""}`;
-      }
+    if (result.stdout) {
+      logLine(config, `${logLabel}: ${result.stdout.slice(0, 200)}`);
     }
-
-    if (stdout) {
-      logLine(config, `${logLabel}: ${stdout.slice(0, 200)}`);
-    }
-    if (exitCode !== 0 || result.signal || result.error) {
+    if (result.exitCode !== 0 || result.signal) {
+      const stdout = result.stdout;
+      const stderr = result.stderr;
       const stderrPreview = stderr ? stderr.slice(0, 200) : "(empty)";
-      logLine(config, `${logLabel} bin=${claudeExecutable} exit=${exitCode} signal=${result.signal || "none"} stderr=${stderrPreview}`);
+      logLine(config, `${logLabel} bin=${claudeExecutable} exit=${result.exitCode} signal=${result.signal || "none"} stderr=${stderrPreview}`);
     }
+    return {
+      stdout: result.stdout,
+      stderr: result.stderr,
+      exitCode: result.exitCode,
+    };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     logLine(config, `${logLabel} crash: ${msg}`);
     return { stdout: "", stderr: msg, exitCode: 1 };
   }
-
-  return { stdout, stderr, exitCode };
 }
 
 function parseActionCandidate(candidate: unknown): ActionResult | null {
@@ -708,7 +812,7 @@ async function handleMessage(
     const label = `RiskyExec ${entry.id}`;
     logLine(config, `RiskyExec calling claude for ${entry.id}`);
 
-    let result = callClaude(riskyStdin, config.projectRoot, true, label, config, RISKY_EXECUTE_SYSTEM_PROMPT);
+    let result = await callClaude(riskyStdin, config.projectRoot, true, label, config, "risky_execute", RISKY_EXECUTE_SYSTEM_PROMPT);
     let action = parseActionJson(result.stdout);
     const retryReason = !action ? getClaudeRetryReason(result) : null;
     if (retryReason) {
@@ -718,7 +822,7 @@ async function handleMessage(
         : `${label} empty stdout (exit=0), retrying after ${Math.round(retryDelayMs / 1000)}s`;
       logLine(config, retryNote);
       await Bun.sleep(retryDelayMs);
-      result = callClaude(riskyStdin, config.projectRoot, true, `${label} retry`, config, RISKY_EXECUTE_SYSTEM_PROMPT);
+      result = await callClaude(riskyStdin, config.projectRoot, true, `${label} retry`, config, "risky_execute", RISKY_EXECUTE_SYSTEM_PROMPT);
       action = parseActionJson(result.stdout);
     }
 
@@ -748,7 +852,7 @@ async function handleMessage(
   const classifyLabel = `Classify ${entry.id}`;
   logLine(config, `Classify calling claude for ${entry.id}`);
 
-  let classifyResult = callClaude(classifyStdin, config.projectRoot, false, classifyLabel, config, CLASSIFY_SYSTEM_PROMPT);
+  let classifyResult = await callClaude(classifyStdin, config.projectRoot, false, classifyLabel, config, "classify", CLASSIFY_SYSTEM_PROMPT);
   let classifyRetryReason = !classifyResult.stdout.trim() && classifyResult.exitCode === 0
     ? "empty_stdout"
     : getClaudeRetryReason(classifyResult);
@@ -760,7 +864,7 @@ async function handleMessage(
       : `${classifyLabel} empty stdout (exit=0), retrying after ${Math.round(retryDelayMs / 1000)}s`;
     logLine(config, retryNote);
     await Bun.sleep(retryDelayMs);
-    classifyResult = callClaude(classifyStdin, config.projectRoot, false, `${classifyLabel} retry`, config, CLASSIFY_SYSTEM_PROMPT);
+    classifyResult = await callClaude(classifyStdin, config.projectRoot, false, `${classifyLabel} retry`, config, "classify", CLASSIFY_SYSTEM_PROMPT);
     classifyRetryReason = null;
   }
 
@@ -788,7 +892,7 @@ async function handleMessage(
     const executeLabel = `Execute ${entry.id}`;
     logLine(config, `Execute calling claude for ${entry.id}`);
 
-    let execResult = callClaude(executeStdin, config.projectRoot, true, executeLabel, config, SAFE_EXECUTE_SYSTEM_PROMPT);
+    let execResult = await callClaude(executeStdin, config.projectRoot, true, executeLabel, config, "execute", SAFE_EXECUTE_SYSTEM_PROMPT);
     const executeRetryReason = !execResult.stdout.trim() && execResult.exitCode === 0
       ? "empty_stdout"
       : getClaudeRetryReason(execResult);
@@ -800,7 +904,7 @@ async function handleMessage(
         : `${executeLabel} empty stdout (exit=0), retrying after ${Math.round(retryDelayMs / 1000)}s`;
       logLine(config, retryNote);
       await Bun.sleep(retryDelayMs);
-      execResult = callClaude(executeStdin, config.projectRoot, true, `${executeLabel} retry`, config, SAFE_EXECUTE_SYSTEM_PROMPT);
+      execResult = await callClaude(executeStdin, config.projectRoot, true, `${executeLabel} retry`, config, "execute", SAFE_EXECUTE_SYSTEM_PROMPT);
     }
 
     const execAction = parseActionJson(execResult.stdout);

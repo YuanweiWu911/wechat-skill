@@ -1356,8 +1356,14 @@ function runRiskTests(): TestResult[] {
     const env = {
       ANTHROPIC_MODEL: process.env.ANTHROPIC_MODEL_WATCHER || "claude-haiku-4-5-20251001",
     };
-    const timeoutMsRaw = Number.parseInt(process.env.API_TIMEOUT_MS || "", 10);
-    const timeoutMs = Number.isFinite(timeoutMsRaw) && timeoutMsRaw > 0 ? timeoutMsRaw : 120000;
+    const timeoutMsRaw = Number.parseInt(process.env.WECHAT_CLAUDE_TIMEOUT_RISKY_MS || process.env.API_TIMEOUT_MS || "", 10);
+    const timeoutMs = Number.isFinite(timeoutMsRaw) && timeoutMsRaw > 0 ? timeoutMsRaw : 600000;
+    push(
+      results,
+      "default risky timeout in probe report is not shorter than 600000ms",
+      timeoutMs >= 600000 ? "PASS" : "FAIL",
+      `当前探针超时=${timeoutMs}ms；重任务默认预算不应低于 600000ms`,
+    );
     const createProbePath = join(projectRoot, "risk-create-probe.txt");
     const deleteProbePath = join(projectRoot, "risk-delete-probe.txt");
     const probeReportPath = join(projectRoot, ".claude", "risk-exec-probe.json");
@@ -1514,6 +1520,67 @@ function runWatcherTests(): TestResult[] {
   const pidPath = join(projectRoot, ".claude", "wechat-auto.pid");
   const startScript = join(hooksDir, "start-wechat-auto.ps1");
   const stopScript = join(hooksDir, "stop-wechat-auto.ps1");
+  const watcherSource = readFileSync(join(hooksDir, "wechat-auto-reply.ts"), "utf-8");
+  const callClaudeMatch = watcherSource.match(/(?:async\s+)?function callClaude\([\s\S]*?\n\}\n\nfunction parseActionCandidate/);
+  const callClaudeBlock = callClaudeMatch?.[0] || "";
+  push(
+    results,
+    "callClaude is async so stalled claude child cannot freeze watcher forever",
+    /^async function callClaude\(/.test(callClaudeBlock) ? "PASS" : "FAIL",
+    /^async function callClaude\(/.test(callClaudeBlock)
+      ? "callClaude 已改为 async；可配合外部定时器在超时时恢复 watcher 主循环"
+      : "callClaude 仍是同步函数；一旦 claude 子进程卡住，整个 watcher 事件循环都会被阻塞，CLASSIFY_TTL 也无法生效",
+  );
+  push(
+    results,
+    "callClaude timeout cleanup kills full child process tree",
+    /function killClaudeProcessTree\(/.test(watcherSource) && /taskkill/i.test(watcherSource) && /\/T/.test(watcherSource)
+      ? "PASS"
+      : "FAIL",
+    /function killClaudeProcessTree\(/.test(watcherSource) && /taskkill/i.test(watcherSource) && /\/T/.test(watcherSource)
+      ? "超时清理已覆盖整个子进程树，避免 Windows 下仅杀父进程后残留 claude 子进程"
+      : "当前源码里还看不到 taskkill /T 这类整棵进程树清理；spawnSync timeout 在 Windows 后台场景下不够可靠",
+  );
+  push(
+    results,
+    "classify timeout stays at 120000ms by default",
+    /function getClaudeTimeoutMs\(stage: ClaudeStage\)[\s\S]*?stage === "classify" \? 120000 : 600000/.test(watcherSource)
+      ? "PASS"
+      : "FAIL",
+    "分类阶段默认仍应保持 120000ms，避免轻量消息响应被无上限拉长",
+  );
+  push(
+    results,
+    "risky exec timeout is longer than classify timeout by default",
+    /function getClaudeTimeoutMs\(stage: ClaudeStage\)[\s\S]*?stage === "classify" \? 120000 : 600000/.test(watcherSource)
+      ? "PASS"
+      : "FAIL",
+    "确认后的重任务执行需要独立更长超时，默认值应明显大于分类阶段",
+  );
+  push(
+    results,
+    "callClaude callers pass classify and risky stages explicitly",
+    /callClaude\(classifyStdin,\s*config\.projectRoot,\s*false,\s*classifyLabel,\s*config,\s*"classify"/.test(watcherSource) &&
+      /callClaude\(executeStdin,\s*config\.projectRoot,\s*true,\s*executeLabel,\s*config,\s*"execute"/.test(watcherSource) &&
+      /callClaude\(riskyStdin,\s*config\.projectRoot,\s*true,\s*label,\s*config,\s*"risky_execute"/.test(watcherSource)
+      ? "PASS"
+      : "FAIL",
+    "调用点必须显式声明阶段，防止后续回退到单一共享超时",
+  );
+  push(
+    results,
+    "message lifecycle persists enough data to recover stuck classifying messages after restart",
+    /interface MessageLifecycle[\s\S]*originalText\?: string[\s\S]*fromUserId\?: string[\s\S]*contextToken\?: string/.test(watcherSource)
+      ? "PASS"
+      : "FAIL",
+    "若 watcher 在 classifying 阶段被杀/重启，需要持久化原始文本与会话信息，才能在启动时恢复处理或至少发送兜底回复，避免用户一直无响应",
+  );
+  push(
+    results,
+    "watcher uses CLASSIFY_TTL_MS to recover stale classifying messages on startup",
+    /async function recoverStaleClassifyingMessages\([\s\S]*CLASSIFY_TTL_MS/.test(watcherSource) ? "PASS" : "FAIL",
+    "CLASSIFY_TTL_MS 不能只是常量，必须在启动时对 stale classifying 做恢复扫描，否则重启后这类消息永远不会再被处理",
+  );
   if (existsSync(pidPath)) {
     const pid = readFileSync(pidPath, "utf-8").trim();
     const pidCheck = runCommand("tasklist", ["/FI", `PID eq ${pid}`], { timeout: 15000 });
