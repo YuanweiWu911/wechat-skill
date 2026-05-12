@@ -1569,6 +1569,15 @@ function runWatcherTests(): TestResult[] {
   );
   push(
     results,
+    "sendActionReply splits long messages instead of clipping at 800 chars",
+    /function splitLongMessage\(text: string,\s*maxLen: number\)/.test(watcherSource) &&
+      /const chunks = splitLongMessage\(action\.reply, MAX_REPLY_CHUNK_SIZE\)/.test(watcherSource)
+      ? "PASS"
+      : "FAIL",
+    "长回复应通过 splitLongMessage 按自然边界拆分为多段发送，而不是直接截断到 800 字符加 \"...\"",
+  );
+  push(
+    results,
     "message lifecycle persists enough data to recover stuck classifying messages after restart",
     /interface MessageLifecycle[\s\S]*originalText\?: string[\s\S]*fromUserId\?: string[\s\S]*contextToken\?: string/.test(watcherSource)
       ? "PASS"

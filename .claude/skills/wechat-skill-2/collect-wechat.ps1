@@ -14,6 +14,7 @@ $startWatcherScript = Join-Path $PSScriptRoot "..\..\hooks\start-wechat-auto.ps1
 $stopWatcherScript = Join-Path $PSScriptRoot "..\..\hooks\stop-wechat-auto.ps1"
 $runnerLauncherPath = Join-Path $PSScriptRoot "..\..\hooks\start-wechat-auto-runner.ps1"
 $pidPath = Join-Path $PSScriptRoot "..\..\wechat-auto.pid"
+$chatHistoryPath = Join-Path $PSScriptRoot "..\..\chat-history.jsonl"
 $projectRoot = Resolve-Path (Join-Path $PSScriptRoot "..\..\..")
 
 if (-not (Test-Path $startWatcherScript)) {
@@ -94,6 +95,7 @@ if ($InboxArgs) {
 
 $startRequested = $normalizedArgs -contains "--start"
 $stopRequested = $normalizedArgs -contains "--stop"
+$historyRequested = $normalizedArgs -contains "--history"
 $usesAll = $normalizedArgs -contains "--all"
 $usesLimit = [Array]::IndexOf($normalizedArgs, "--limit") -ge 0
 
@@ -196,6 +198,60 @@ if ($stopRequested) {
   }
 
   Write-Output $watcherStoppedMessage
+  exit 0
+}
+
+if ($historyRequested) {
+  $historyIndex = [Array]::IndexOf($normalizedArgs, "--history")
+  $countStr = ""
+  if ($historyIndex -ge 0 -and $historyIndex + 1 -lt $normalizedArgs.Length) {
+    $countStr = $normalizedArgs[$historyIndex + 1]
+  }
+  $count = 20
+  if ($countStr -ne "" -and [int]::TryParse($countStr, [ref]$count)) {
+    $count = [Math]::Max(1, $count)
+  }
+
+  if (-not (Test-Path $chatHistoryPath)) {
+    Write-Output "(no chat history yet)"
+    exit 0
+  }
+
+  $lines = @()
+  Get-Content -Path $chatHistoryPath -Encoding UTF8 | ForEach-Object {
+    if ($_ -match '\S') { $lines += $_ }
+  }
+
+  $total = $lines.Count
+  $start = [Math]::Max(0, $total - $count)
+  $lines = $lines[$start..($total - 1)]
+
+  $markerIn = (ConvertFrom-CodePoints @(0x8FDB, 0xFF1A))
+  $markerOut = (ConvertFrom-CodePoints @(0x51FA, 0xFF1A))
+  $markerFmt = (ConvertFrom-CodePoints @(0x5F53, 0x524D, 0x6700, 0x65B0))
+  Write-Output "${markerFmt} ${start}/${total}"
+
+  foreach ($line in $lines) {
+    try {
+      $entry = $line | ConvertFrom-Json
+      $ts = $entry.time
+      if ($ts -and $ts -match '^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2}:\d{2})') {
+        $ts = "$($matches[1]) $($matches[2])"
+      }
+      if ($entry.direction -eq "in") {
+        Write-Output "[$ts] ${markerIn} $($entry.text)"
+      } else {
+        $fileTag = ""
+        if ($entry.file) { $fileTag = " [file: $($entry.file)]" }
+        Write-Output "[$ts] ${markerOut} $($entry.text)$fileTag"
+      }
+    } catch {
+      Write-Output $line
+    }
+  }
+
+  Write-Output "---"
+  Write-Output "${start}/${total}"
   exit 0
 }
 

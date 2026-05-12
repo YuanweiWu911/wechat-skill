@@ -25,6 +25,10 @@ interface MessageLifecycle {
   failCount: number;
   lastAttemptAt: string; // ISO timestamp
   cachedAction?: ActionResult; // preserved across restarts for crash recovery
+  originalText?: string;
+  fromUserId?: string;
+  contextToken?: string;
+  receivedAt?: string;
 }
 
 interface AutoReplyState {
@@ -74,6 +78,7 @@ interface AutoReplyConfig {
   statePath: string;
   pendingPath: string;
   cursorPath: string;
+  chatHistoryPath: string;
 }
 
 interface FileTransferDecision {
@@ -85,6 +90,7 @@ interface FileTransferDecision {
 }
 
 const DEFAULT_POLL_MS = 8000;
+const MAX_REPLY_CHUNK_SIZE = 500;
 const DIRECT_SEND_CONFIRM_THRESHOLD_BYTES = 10 * 1024 * 1024;
 const DIRECT_SEND_ALLOWED_EXTENSIONS = new Set([
   ".json",
@@ -269,6 +275,10 @@ function saveCursor(cursorPath: string, cursor: string): void {
 function logLine(config: AutoReplyConfig, message: string): void {
   const line = `[${new Date().toISOString()}] ${message}`;
   console.log(line);
+}
+
+function appendChatHistory(config: AutoReplyConfig, record: Record<string, unknown>): void {
+  appendFileSync(config.chatHistoryPath, JSON.stringify(record) + "\n", "utf-8");
 }
 
 function loadAccount(stateDir: string): AccountData | null {
@@ -980,6 +990,7 @@ async function safeSendText(
         contextToken: params.contextToken,
       });
       logLine(config, `Message sent: ${params.text.slice(0, 60)}`);
+      appendChatHistory(config, { time: new Date().toISOString(), direction: "out", to: params.to, text: params.text });
       return true;
     } catch (err) {
       logLine(config, `Send attempt ${i + 1} failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -1012,6 +1023,7 @@ async function safeSendMediaFile(
         cdnBaseUrl: params.cdnBaseUrl,
       });
       logLine(config, `File sent: ${params.filePath}`);
+      appendChatHistory(config, { time: new Date().toISOString(), direction: "out", to: params.to, text: params.text, file: params.filePath });
       return true;
     } catch (err) {
       logLine(config, `Send file attempt ${i + 1} failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -1024,6 +1036,26 @@ async function safeSendMediaFile(
   return false;
 }
 
+function splitLongMessage(text: string, maxLen: number): string[] {
+  if (text.length <= maxLen) return [text];
+  const chunks: string[] = [];
+  let remaining = text;
+  while (remaining.length > maxLen) {
+    let cut = maxLen;
+    for (const sep of ["\n\n", "\n", "。", "！", "？"]) {
+      const idx = remaining.lastIndexOf(sep, maxLen);
+      if (idx > maxLen * 0.4) {
+        cut = idx + sep.length;
+        break;
+      }
+    }
+    chunks.push(remaining.slice(0, cut).trimEnd());
+    remaining = remaining.slice(cut).trimStart();
+  }
+  if (remaining) chunks.push(remaining);
+  return chunks;
+}
+
 async function sendActionReply(
   action: Extract<ActionResult, { type: "chat" | "executed" }>,
   to: string,
@@ -1031,21 +1063,23 @@ async function sendActionReply(
   wrappedSendText: (params: { to: string; text: string; contextToken: string }) => Promise<boolean>,
   wrappedSendMediaFile: (params: { to: string; filePath: string; text: string; contextToken: string }) => Promise<boolean>,
 ): Promise<boolean> {
-  const clipped = action.reply.length > 800 ? action.reply.slice(0, 800) + "..." : action.reply;
+  const chunks = splitLongMessage(action.reply, MAX_REPLY_CHUNK_SIZE);
   const files = action.type === "executed" ? action.files || [] : [];
   if (files.length === 0) {
-    return wrappedSendText({ to, text: clipped, contextToken });
+    for (const chunk of chunks) {
+      if (!await wrappedSendText({ to, text: chunk, contextToken })) return false;
+    }
+    return true;
   }
   for (let index = 0; index < files.length; index++) {
+    const text = index < chunks.length ? chunks[index] : "";
     const sent = await wrappedSendMediaFile({
       to,
       filePath: files[index],
-      text: index === 0 ? clipped : "",
+      text,
       contextToken,
     });
-    if (!sent) {
-      return false;
-    }
+    if (!sent) return false;
   }
   return true;
 }
@@ -1058,15 +1092,65 @@ function advanceState(
   status: MessageLifecycle["status"],
   failCount?: number,
   cachedAction?: ActionResult,
+  envelope?: { originalText: string; fromUserId: string; contextToken: string; receivedAt: string },
 ): void {
   const state = loadState(config.statePath);
+  const existing = state.messageStates[entryId];
   state.messageStates[entryId] = {
     status,
     failCount: failCount ?? 0,
     lastAttemptAt: new Date().toISOString(),
     cachedAction,
+    originalText: envelope?.originalText ?? existing?.originalText,
+    fromUserId: envelope?.fromUserId ?? existing?.fromUserId,
+    contextToken: envelope?.contextToken ?? existing?.contextToken,
+    receivedAt: envelope?.receivedAt ?? existing?.receivedAt,
   };
   saveState(config.statePath, state);
+}
+
+async function recoverStaleClassifyingMessages(
+  config: AutoReplyConfig,
+  wrappedSendText: (params: { to: string; text: string; contextToken: string }) => Promise<boolean>,
+): Promise<void> {
+  const state = loadState(config.statePath);
+  const now = Date.now();
+  const staleIds: string[] = [];
+  for (const [id, lifecycle] of Object.entries(state.messageStates)) {
+    if (lifecycle.status !== "classifying") continue;
+    const ageMs = now - new Date(lifecycle.lastAttemptAt).getTime();
+    if (ageMs < CLASSIFY_TTL_MS) continue;
+    staleIds.push(id);
+  }
+  if (staleIds.length === 0) return;
+  logLine(config, `Recovery: ${staleIds.length} stale classifying messages`);
+  for (const id of staleIds) {
+    const lifecycle = state.messageStates[id];
+    const to = lifecycle.fromUserId;
+    if (!to) {
+      logLine(config, `Recovery skip ${id}: missing fromUserId`);
+      continue;
+    }
+    const fallback = fallbackReply(lifecycle.originalText || "");
+    const contextToken = lifecycle.contextToken || "";
+    logLine(config, `Recovery: sending fallback for ${id}`);
+    let sent = false;
+    try {
+      sent = await wrappedSendText({ to, text: fallback, contextToken });
+    } catch {
+      sent = false;
+    }
+    if (sent) {
+      advanceState(config, id, "replied");
+      logLine(config, `Recovery: fallback sent for ${id}`);
+    } else {
+      advanceState(config, id, "dead");
+      logLine(config, `Recovery: fallback failed for ${id}, moved to dead-letter`);
+      const currentState = loadState(config.statePath);
+      const newDead = [...(currentState.deadLetterIds || []), id].slice(-200);
+      saveState(config.statePath, { ...currentState, deadLetterIds: newDead });
+    }
+  }
 }
 
 /** Finalize a classified message: send reply, or retry, or fallback. */
@@ -1186,7 +1270,12 @@ async function handleIncomingMessage(
     }
 
     logLine(config, `Processing: ${entry.id} text="${entry.text.slice(0, 80)}"`);
-    advanceState(config, entry.id, "classifying");
+    advanceState(config, entry.id, "classifying", 0, undefined, {
+      originalText: entry.text,
+      fromUserId: entry.fromUserId,
+      contextToken: entry.contextToken || "",
+      receivedAt: entry.receivedAt,
+    });
 
     let action: ActionResult;
     try {
@@ -1366,6 +1455,7 @@ async function main(): Promise<void> {
     statePath: join(claudeDir, "wechat-auto-state.json"),
     pendingPath: join(claudeDir, "wechat-auto-pending.jsonl"),
     cursorPath: join(claudeDir, "wechat-auto-cursor.txt"),
+    chatHistoryPath: join(claudeDir, "chat-history.jsonl"),
   };
 
   const initialState = loadState(config.statePath);
@@ -1436,6 +1526,8 @@ async function main(): Promise<void> {
 
   await warmupApiSession(account, getUpdates, config);
 
+  await recoverStaleClassifyingMessages(config, wrappedSendText);
+
   const controller = new AbortController();
   const shutdown = () => {
     if (!controller.signal.aborted) {
@@ -1466,6 +1558,12 @@ async function main(): Promise<void> {
     wrappedSendText,
     onEntry: async (entry) => {
       received++;
+      appendChatHistory(config, {
+        time: new Date().toISOString(),
+        direction: "in",
+        from: entry.fromUserId,
+        text: entry.text,
+      });
       await handleIncomingMessage(config, entry, wrappedSendText, wrappedSendMediaFile);
       if (once && received > 0) {
         shutdown();
