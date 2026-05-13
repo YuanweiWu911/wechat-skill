@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository purpose
 
-This is a personal sandbox for learning, practicing, and prototyping Claude Code custom skills. The main active project is `wechat-skill-2`, which includes a Bun-based watcher, PowerShell launch scripts, and watcher-focused regression tests in `test-watcher.ts`.
+This is a personal sandbox for learning, practicing, and prototyping Claude Code custom skills. The main active project is `wechat-skill-2`, which includes a Bun-based watcher, PowerShell launch scripts, watcher-focused regression tests in `test-watcher.ts`, and a Web GUI control center (`wechat-gui-server.ts` + `wechat-skill-gui.html`).
 
 Current repository status: `wechat-skill-2` is upgraded to work with `cc-weixin v0.2.1`.
 
@@ -47,6 +47,33 @@ When modifying `wechat-skill-2`, treat the watcher behavior below as a contract,
 - **Cursor contract:** watcher progress is persisted in project-local `.claude/wechat-auto-cursor.txt`; do not switch it back to the plugin-global cursor
 - **Start entry contract:** `wechat-skill-2` supports `/wechat-skill-2 --start` as a skill-entry control mode; this must route in `collect-wechat.ps1` before inbox import, stay exclusive with all other arguments, and only return success after the project watcher is observably running
 - **Stop entry contract:** `wechat-skill-2` supports `/wechat-skill-2 --stop` as a skill-entry control mode; this must route in `collect-wechat.ps1` before inbox import and must stay exclusive with `--all` / `--limit`
+
+## WeChat Skill GUI
+
+The project includes a Web-based control center for visually managing the watcher.
+
+**Launch:**
+```powershell
+bun run wechat-gui-server.ts
+```
+Then open **http://localhost:3456** in a browser.
+
+**Files:**
+- `wechat-gui-server.ts` — Bun backend serving REST API on port 3456
+- `wechat-skill-gui.html` — Single-page dark-theme frontend
+
+**Features:**
+- Watcher status indicator, start/stop/restart controls
+- Message polling trigger with auto-refresh
+- Session list with WeChat-style message bubbles
+- Keyword search across chat history
+- Pending risk-approval review panel
+- Runtime statistics (replied / risky / dead-letter counts)
+
+**Compile to standalone exe:**
+```powershell
+bun build wechat-gui-server.ts --compile --outfile wechat-gui-server.exe
+```
 
 ## Security: WeChat skill chain (`wechat-skill-2`)
 

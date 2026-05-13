@@ -105,3 +105,40 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_SKILL_DIR}/wechat-
 - `/wechat-skill-2 --start`：启动后台 watcher
 - `/wechat-skill-2 --stop`：停止后台 watcher
 - `/wechat-skill-2`：查看 watcher 状态，并提示 MCP channel push 已启用
+
+## 图形管理界面 (Web GUI)
+
+项目提供了一个基于 Bun 的 Web 控制台，可通过浏览器可视化管理 watcher。
+
+**启动命令：**
+
+```powershell
+bun run wechat-gui-server.ts
+```
+
+启动后访问 **http://localhost:3456** 即可打开操作面板。
+
+**核心文件：**
+
+| 文件 | 说明 |
+|------|------|
+| `wechat-gui-server.ts` | Bun 后端服务器，提供 REST API（端口 3456） |
+| `wechat-skill-gui.html` | 单页面 GUI 前端（深色工业风设计） |
+
+**GUI 提供以下功能：**
+
+- **Watcher 状态监控** — 顶部状态徽章实时显示运行/停止状态
+- **Watcher 启停控制** — 一键启动、停止、重启 watcher
+- **消息盒子更新** — 手动触发消息轮询 + 自动 5 秒刷新
+- **会话浏览** — 左侧会话列表，点击切换，按时间倒排
+- **对话气泡展示** — 类微信风格，用户消息居左、Bot 回复居右
+- **历史关键词检索** — 左侧搜索框过滤会话 + 模态框全局历史搜索
+- **风险请求审核** — 底部面板列出待审核项，支持批准/拒绝
+- **运行统计** — 已回复/风险待审/死信统计
+
+**编译为独立 exe（可选）：**
+
+```powershell
+bun build wechat-gui-server.ts --compile --outfile wechat-gui-server.exe
+.\wechat-gui-server.exe
+```

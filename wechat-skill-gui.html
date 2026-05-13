@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>WeChat Skill Control Center</title>
+<script>if(location.protocol==='file:'){location.replace('http://localhost:3456/')}</script>
 <style>
 :root {
   --bg-primary: #0a0c10;
@@ -35,6 +36,32 @@
   --shadow-card: 0 1px 3px rgba(0,0,0,0.4), 0 1px 2px rgba(0,0,0,0.3);
   --shadow-elevated: 0 4px 12px rgba(0,0,0,0.5), 0 2px 4px rgba(0,0,0,0.3);
   --transition: 180ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+[data-theme="light"] {
+  --bg-primary: #f5f5f7;
+  --bg-secondary: #ffffff;
+  --bg-surface: #f0f0f2;
+  --bg-surface-hover: #e8e8ec;
+  --bg-elevated: #ffffff;
+  --border-color: #d4d4d8;
+  --border-light: #e4e4e7;
+  --text-primary: #18181b;
+  --text-secondary: #52525b;
+  --text-muted: #a1a1aa;
+  --accent: #0d9488;
+  --accent-dim: rgba(13, 148, 136, 0.1);
+  --accent-glow: rgba(13, 148, 136, 0.06);
+  --green: #16a34a;
+  --green-dim: rgba(22, 163, 74, 0.1);
+  --amber: #d97706;
+  --amber-dim: rgba(217, 119, 6, 0.1);
+  --red: #dc2626;
+  --red-dim: rgba(220, 38, 38, 0.1);
+  --blue: #2563eb;
+  --blue-dim: rgba(37, 99, 235, 0.08);
+  --shadow-card: 0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.06);
+  --shadow-elevated: 0 4px 12px rgba(0,0,0,0.1), 0 2px 4px rgba(0,0,0,0.06);
 }
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -238,10 +265,10 @@ html, body {
   border-top-left-radius: 2px;
 }
 .msg--out .msg-bubble {
-  background: linear-gradient(135deg, rgba(45, 212, 191, 0.18), rgba(45, 212, 191, 0.08));
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
   color: var(--text-primary);
   border-top-right-radius: 2px;
-  border: 1px solid rgba(45, 212, 191, 0.12);
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
 }
 .msg-bubble--risk {
   background: var(--amber-dim) !important;
@@ -437,6 +464,7 @@ html, body {
         <span class="status-dot"></span>
         <span id="statusText">检查中...</span>
       </span>
+      <button class="btn btn--icon btn--ghost" id="themeToggle" onclick="toggleTheme()" title="切换配色">☀</button>
       <button class="btn btn--icon btn--ghost" onclick="refreshAll()" title="刷新">⟳</button>
     </div>
   </header>
@@ -1019,8 +1047,37 @@ function startPolling() {
   pollInterval = setInterval(refreshAll, 5000);
 }
 
+// ======================== THEME ========================
+function toggleTheme() {
+  const html = document.documentElement;
+  const isLight = html.getAttribute('data-theme') === 'light';
+  if (isLight) {
+    html.removeAttribute('data-theme');
+    document.getElementById('themeToggle').textContent = '☀';
+    document.getElementById('themeToggle').title = '切换为浅色';
+    localStorage.setItem('theme', 'dark');
+  } else {
+    html.setAttribute('data-theme', 'light');
+    document.getElementById('themeToggle').textContent = '☾';
+    document.getElementById('themeToggle').title = '切换为深色';
+    localStorage.setItem('theme', 'light');
+  }
+}
+
+function applyTheme() {
+  const saved = localStorage.getItem('theme');
+  if (saved === 'light') {
+    document.documentElement.setAttribute('data-theme', 'light');
+    document.getElementById('themeToggle').textContent = '☾';
+    document.getElementById('themeToggle').title = '切换为深色';
+  }
+}
+
 // ======================== INIT ========================
-document.addEventListener('DOMContentLoaded', startPolling);
+document.addEventListener('DOMContentLoaded', () => {
+  applyTheme();
+  startPolling();
+});
 window.addEventListener('unload', () => { if (pollInterval) clearInterval(pollInterval); });
 </script>
 </body>

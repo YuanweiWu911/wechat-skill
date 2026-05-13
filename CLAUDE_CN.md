@@ -6,7 +6,7 @@
 
 ## 仓库用途
 
-这是一个用于学习、练习和原型验证 Claude Code 自定义技能的个人沙箱仓库。当前最主要的活跃项目是 `wechat-skill-2`，包含基于 Bun 的 watcher、PowerShell 启动脚本，以及位于 `test-watcher.ts` 的 watcher 回归测试。
+这是一个用于学习、练习和原型验证 Claude Code 自定义技能的个人沙箱仓库。当前最主要的活跃项目是 `wechat-skill-2`，包含基于 Bun 的 watcher、PowerShell 启动脚本、位于 `test-watcher.ts` 的 watcher 回归测试，以及一个 Web GUI 控制中心（`wechat-gui-server.ts` + `wechat-skill-gui.html`）。
 
 当前仓库状态：`wechat-skill-2` 已升级为 **兼容 `cc-weixin v0.2.1`** 的实现。
 
@@ -48,6 +48,40 @@
 - **Cursor 契约：** watcher 进度持久化在项目内 `.claude/wechat-auto-cursor.txt`；不要再切回插件全局 cursor
 - **Start 入口契约：** `wechat-skill-2` 支持 `/wechat-skill-2 --start` 作为 skill 入口层控制模式；该参数必须在 `collect-wechat.ps1` 中先于 inbox 导入被处理，且必须与其他所有参数保持互斥；只有在观察到当前项目 watcher 已后台运行后，才能返回成功
 - **Stop 入口契约：** `wechat-skill-2` 支持 `/wechat-skill-2 --stop` 作为 skill 入口层控制模式；该参数必须在 `collect-wechat.ps1` 中先于 inbox 导入被处理，且必须与 `--all` / `--limit` 保持互斥
+
+## WeChat Skill GUI（图形管理界面）
+
+项目附带一个基于 Web 的控制中心，可零命令行可视化管理 watcher。
+
+**启动命令：**
+
+```powershell
+bun run wechat-gui-server.ts
+```
+
+然后在浏览器打开 **http://localhost:3456**。
+
+**核心文件：**
+
+- `wechat-gui-server.ts` — Bun 后端服务器，提供 REST API，端口 3456
+- `wechat-skill-gui.html` — 单页面暗色主题前端
+
+**功能列表：**
+
+- **Watcher 状态指示** — 顶部状态徽章，运行/停止/启动中
+- **启停控制** — 一键启动、停止、重启 watcher
+- **消息更新** — 手动触发消息轮询 + 自动 5 秒刷新
+- **会话浏览** — 左侧列表按时间倒排，点击切换
+- **对话气泡** — 类微信风格，用户消息居左、Bot 回复居右
+- **关键词搜索** — 侧栏过滤 + 模态框全局历史检索
+- **风险审核面板** — 底部弹出面板，支持批准/拒绝
+- **运行统计** — 已回复/风险待审/死信计数
+
+**编译为独立 exe：**
+
+```powershell
+bun build wechat-gui-server.ts --compile --outfile wechat-gui-server.exe
+```
 
 ## 安全：微信技能链（`wechat-skill-2`）
 
