@@ -3,7 +3,7 @@
 // Start watcher + built-in HTTP server + open browser.
 // NO external bun dependency needed at runtime.
 
-import { existsSync, readFileSync, appendFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, appendFileSync, writeFileSync, rmSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 
@@ -140,9 +140,25 @@ function startWatcher(): Promise<boolean> {
 //  HTTP SERVER (fully inline, no external bun needed)
 // ═══════════════════════════════════════════════════════
 
+function findBun(): string {
+  const result = spawnSync("where.exe", ["bun"], { encoding: "utf-8", timeout: 5000, windowsHide: true });
+  for (const line of (result.stdout || "").split(/\r?\n/)) {
+    const t = line.trim();
+    if (t && existsSync(t)) {
+      if (t.toLowerCase().endsWith(".exe")) return t;
+      if (t.toLowerCase().endsWith(".cmd")) return t;
+    }
+  }
+  return "bun.exe";
+}
+
 async function handleRequest(req: Request): Promise<Response> {
   const url = new URL(req.url);
   const method = req.method;
+
+  // ── Resolve bun once per request for send APIs
+  const bunPath = findBun();
+  const useCmd = bunPath.toLowerCase().endsWith(".cmd");
 
   if (method === "OPTIONS") return new Response(null, { headers: corsHeaders() });
 
@@ -235,6 +251,104 @@ async function handleRequest(req: Request): Promise<Response> {
     return json({ success: true, message: `已拒绝 ${id}` });
   }
 
+  // POST /api/send — send text message to WeChat user
+  if (route === "send" && method === "POST") {
+    try {
+      const body = await req.json();
+      const { to, text } = body;
+      if (!to || !text) return json({ error: "Missing to or text" }, 400);
+
+      const sendScript = join(PROJ, "wechat-send.ts");
+      if (!existsSync(sendScript)) return json({ error: "wechat-send.ts not found" }, 500);
+
+      const spawnBin = useCmd ? "cmd.exe" : bunPath;
+      const spawnArgs = useCmd
+        ? ["/c", bunPath, "run", sendScript, "--to", to, "--text", text]
+        : ["run", sendScript, "--to", to, "--text", text];
+
+      const r = spawnSync(spawnBin, spawnArgs, {
+        cwd: PROJ, encoding: "utf-8", timeout: 30000, windowsHide: true,
+        env: { ...process.env, BUN_UTF8: "1" },
+      });
+
+      const stdout = (r.stdout || "").trim();
+
+      if (stdout) {
+        try {
+          const result = JSON.parse(stdout);
+          if (result.success) {
+            const record = { time: new Date().toISOString(), direction: "out" as const, to, text };
+            try { appendFileSync(HISTORY_PATH, JSON.stringify(record) + "\n", "utf-8"); } catch {}
+            return json({ success: true, messageId: result.messageId });
+          }
+          return json({ success: false, error: result.error || "send failed" }, 500);
+        } catch {}
+      }
+
+      const err = (r.stderr || stdout || "").trim();
+      log(`Send API: bun exit=${r.exitCode} error=${err.slice(0,200)}`);
+      return json({ success: false, error: err || `bun exited with code ${r.exitCode}` }, 500);
+    } catch (e: any) {
+      return json({ success: false, error: e.message }, 500);
+    }
+  }
+
+  // POST /api/send/file — send file to WeChat user
+  if (route === "send/file" && method === "POST") {
+    try {
+      const formData = await req.formData();
+      const to = formData.get("to")?.toString() || "";
+      const text = formData.get("text")?.toString() || "";
+      const file = formData.get("file");
+      if (!to || !file) return json({ error: "Missing to or file" }, 400);
+
+      // Save uploaded file to temp
+      const tmpFile = join(PROJ, ".claude", `wechat-send-tmp-${Date.now()}`);
+      const buf = await file.arrayBuffer();
+      writeFileSync(tmpFile, Buffer.from(buf));
+      const fileName = (file as any).name || "file";
+
+      const sendScript = join(PROJ, "wechat-send.ts");
+      if (!existsSync(sendScript)) {
+        try { rmSync(tmpFile); } catch {}
+        return json({ error: "wechat-send.ts not found" }, 500);
+      }
+
+      const spawnArgs = useCmd
+        ? ["/c", bunPath, "run", sendScript, "--to", to, "--file", tmpFile]
+        : ["run", sendScript, "--to", to, "--file", tmpFile];
+      if (text) spawnArgs.push("--text", text);
+      const spawnBin = useCmd ? "cmd.exe" : bunPath;
+
+      const r = spawnSync(spawnBin, spawnArgs, {
+        cwd: PROJ, encoding: "utf-8", timeout: 60000, windowsHide: true,
+        env: { ...process.env, BUN_UTF8: "1" },
+      });
+
+      try { rmSync(tmpFile); } catch {}
+
+      const stdout = (r.stdout || "").trim();
+
+      if (stdout) {
+        try {
+          const result = JSON.parse(stdout);
+          if (result.success) {
+            const record = { time: new Date().toISOString(), direction: "out" as const, to, text, file: fileName };
+            try { appendFileSync(HISTORY_PATH, JSON.stringify(record) + "\n", "utf-8"); } catch {}
+            return json({ success: true, messageId: result.messageId, fileName });
+          }
+          return json({ success: false, error: result.error || "send failed" }, 500);
+        } catch {}
+      }
+
+      const err = (r.stderr || stdout || "").trim();
+      log(`Send file API: bun exit=${r.exitCode} error=${err.slice(0,200)}`);
+      return json({ success: false, error: err || `bun exited with code ${r.exitCode}` }, 500);
+    } catch (e: any) {
+      return json({ success: false, error: e.message }, 500);
+    }
+  }
+
   return text("Not found", 404);
 }
 
@@ -298,6 +412,14 @@ async function main() {
 
   // 2. Start built-in HTTP server
   if (!hidden) log("Starting built-in GUI server...");
+
+  // Clean stale temp files from previous runs
+  try {
+    for (const entry of readdirSync(join(PROJ, ".claude")).filter(f => f.startsWith("wechat-send-tmp-"))) {
+      try { rmSync(join(PROJ, ".claude", entry)); } catch {}
+    }
+  } catch {}
+
   try {
     server = Bun.serve({
       port: PORT,

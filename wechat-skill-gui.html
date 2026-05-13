@@ -301,6 +301,48 @@ html, body {
 .empty-state-icon { font-size: 40px; opacity: 0.4; }
 .empty-state-text { font-size: 14px; }
 
+/* === Chat Input Area === */
+.chat-input-area {
+  flex-shrink: 0;
+  padding: 10px 16px 12px;
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border-color);
+  display: none;
+}
+.chat-input-area--visible { display: block; }
+.chat-input-row {
+  display: flex; gap: 8px; align-items: flex-end;
+}
+.chat-input {
+  flex: 1; min-height: 38px; max-height: 100px;
+  padding: 8px 12px;
+  background: var(--bg-surface); border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm); color: var(--text-primary);
+  font-size: 13px; font-family: var(--font-sans);
+  outline: none; resize: none;
+  transition: var(--transition); line-height: 1.5;
+}
+.chat-input:focus { border-color: var(--accent); background: var(--bg-surface-hover); }
+.chat-input::placeholder { color: var(--text-muted); }
+.chat-input-actions {
+  display: flex; gap: 6px; flex-shrink: 0;
+}
+.chat-input-info {
+  font-size: 11px; color: var(--text-muted);
+  margin-top: 6px; display: flex; align-items: center; gap: 8px;
+}
+.chat-file-name {
+  font-size: 11px; color: var(--accent);
+  max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.chat-input-hint {
+  font-size: 11px; color: var(--text-muted);
+  flex: 1; text-align: right;
+}
+
+/* file input hidden */
+#fileInput { display: none; }
+
 /* === Bottom Control Bar === */
 .control-bar {
   display: flex; align-items: center; justify-content: space-between;
@@ -505,6 +547,20 @@ html, body {
           <div class="empty-state-text">选择左侧会话查看消息</div>
         </div>
       </div>
+      <div class="chat-input-area" id="chatInputArea">
+        <div class="chat-input-row">
+          <textarea class="chat-input" id="chatInput" rows="1" placeholder="输入消息，按 Enter 发送..." onkeydown="handleSendKey(event)"></textarea>
+          <div class="chat-input-actions">
+            <button class="btn btn--icon" onclick="pickFile()" title="发送文件">📎</button>
+            <button class="btn btn--primary" onclick="sendMessage()" title="发送 (Enter)">发送</button>
+          </div>
+        </div>
+        <div class="chat-input-info">
+          <span class="chat-file-name" id="chatFileName"></span>
+          <span class="chat-input-hint">Ctrl+Enter 换行</span>
+        </div>
+      </div>
+      <input type="file" id="fileInput" onchange="onFilePicked()">
     </main>
   </div>
 
@@ -846,6 +902,109 @@ function renderActiveSession() {
   }).join('');
 
   container.scrollTop = container.scrollHeight;
+
+  // Show/hide input area
+  const inputArea = document.getElementById('chatInputArea');
+  if (activeSessionId && sessions[activeSessionId]) {
+    inputArea.classList.add('chat-input-area--visible');
+    document.getElementById('chatInput').disabled = false;
+    document.getElementById('chatInput').placeholder = `回复 ${session.name}...`;
+  } else {
+    inputArea.classList.remove('chat-input-area--visible');
+  }
+}
+
+// ======================== SEND MESSAGE ========================
+let selectedFile = null;
+
+function handleSendKey(e) {
+  if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+}
+
+function pickFile() {
+  document.getElementById('fileInput').click();
+}
+
+function onFilePicked() {
+  const input = document.getElementById('fileInput');
+  selectedFile = input.files[0];
+  const nameEl = document.getElementById('chatFileName');
+  if (selectedFile) {
+    nameEl.textContent = `📎 ${selectedFile.name}`;
+  } else {
+    nameEl.textContent = '';
+  }
+}
+
+async function sendMessage() {
+  const input = document.getElementById('chatInput');
+  const text = input.value.trim();
+  if (!text && !selectedFile) return;
+  if (!activeSessionId) { showToast('请先选择会话', 'error'); return; }
+
+  const to = sessions[activeSessionId]?.name || activeSessionId;
+  if (!to) { showToast('无法识别目标用户', 'error'); return; }
+
+  if (selectedFile) {
+    // File send
+    const formData = new FormData();
+    formData.append('file', selectedFile);
+    formData.append('to', to);
+    formData.append('text', text);
+
+    try {
+      showToast('正在发送文件...', 'info');
+      const result = await api('/api/send/file', { method: 'POST', body: formData });
+      if (result.success) {
+        showToast('文件已发送', 'success');
+        // Add to local history
+        addSentMessage(to, text ? `${text} (📎 ${selectedFile.name})` : `📎 ${selectedFile.name}`);
+      } else {
+        showToast('发送失败: ' + (result.error || '未知错误'), 'error');
+      }
+    } catch (e) {
+      showToast('发送失败: ' + e.message, 'error');
+    }
+    selectedFile = null;
+    document.getElementById('fileInput').value = '';
+    document.getElementById('chatFileName').textContent = '';
+    input.value = '';
+    return;
+  }
+
+  // Text send
+  try {
+    showToast('正在发送...', 'info');
+    const result = await api('/api/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ to, text }),
+    });
+    if (result.success) {
+      showToast('消息已发送', 'success');
+      addSentMessage(to, text);
+    } else {
+      showToast('发送失败: ' + (result.error || '未知错误'), 'error');
+    }
+  } catch (e) {
+    showToast('发送失败: ' + e.message, 'error');
+  }
+  input.value = '';
+  input.style.height = 'auto';
+}
+
+function addSentMessage(to, text) {
+  currentChatHistory.push({
+    time: new Date().toISOString(),
+    direction: 'out',
+    to,
+    text: text || '',
+  });
+  buildSessionList();
+  renderActiveSession();
 }
 
 // ======================== STATUS ========================
