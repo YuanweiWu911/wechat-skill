@@ -524,10 +524,6 @@ html, body {
     <!-- Sidebar -->
     <aside class="sidebar">
       <div class="sidebar-header">
-        <div class="search-box">
-          <span class="search-icon">⌕</span>
-          <input type="text" id="searchInput" placeholder="搜索历史消息..." oninput="debounceSearch()">
-        </div>
       </div>
       <div class="sidebar-section-label">会话列表</div>
       <div class="session-list" id="sessionList">
@@ -1099,42 +1095,6 @@ async function rejectItem(id) {
   }
 }
 
-// ======================== SEARCH ========================
-let searchTimer = null;
-function debounceSearch() {
-  clearTimeout(searchTimer);
-  searchTimer = setTimeout(doSearch, 300);
-}
-
-function doSearch() {
-  const q = document.getElementById('searchInput').value.trim().toLowerCase();
-  if (!q) { buildSessionList(); return; }
-
-  const container = document.getElementById('sessionList');
-  const filtered = Object.values(sessions).filter(s =>
-    s.messages.some(m => (m.text || '').toLowerCase().includes(q))
-  ).sort((a, b) => (b.lastTime || '').localeCompare(a.lastTime || ''));
-
-  if (filtered.length === 0) {
-    container.innerHTML = '<div class="empty-state" style="padding:40px 20px;gap:4px;"><div class="empty-state-icon">🔍</div><div class="empty-state-text" style="font-size:13px;">未找到匹配会话</div></div>';
-    return;
-  }
-
-  container.innerHTML = filtered.map(s => {
-    const isActive = activeSessionId === s.id;
-    const initial = s.name.length > 2 ? s.name.slice(-2) : s.name;
-    const preview = s.messages.filter(m => (m.text || '').toLowerCase().includes(q)).slice(0, 3).map(m => m.text).join(' | ');
-    const time = formatTime(s.lastTime);
-    return `<div class="session-item ${isActive ? 'session-item--active' : ''}" onclick="selectSession('${s.id}')">
-      <div class="session-avatar ${isActive ? 'session-avatar--active' : ''}">${initial}</div>
-      <div class="session-info">
-        <div class="session-name">${s.name}</div>
-        <div class="session-preview">${escapeHtml(preview.slice(0, 40))}</div>
-      </div>
-      <div class="session-time">${time}</div>
-    </div>`;
-  }).join('');
-}
 
 function showHistorySearch() {
   document.getElementById('searchModal').classList.add('modal-overlay--visible');
