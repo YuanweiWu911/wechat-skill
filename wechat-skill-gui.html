@@ -127,13 +127,6 @@ html, body {
 .status-badge--stopped .status-dot { background: var(--red); }
 .status-badge--starting .status-dot { background: var(--amber); animation: pulse-dot 1s ease-in-out infinite; }
 
-.status-pid {
-  margin-left: 2px;
-  font-size: 11px; font-weight: 400;
-  opacity: 0.7;
-  font-family: monospace;
-}
-
 @keyframes pulse-dot {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.3; }
@@ -512,7 +505,6 @@ html, body {
       <span class="status-badge" id="statusBadge">
         <span class="status-dot"></span>
         <span id="statusText">检查中...</span>
-        <span id="statusPid" class="status-pid" style="display:none"></span>
       </span>
       <button class="btn btn--icon btn--ghost" id="themeToggle" onclick="toggleTheme()" title="切换配色">☀</button>
       <button class="btn btn--icon btn--ghost" onclick="refreshAll()" title="刷新">⟳</button>
@@ -1017,28 +1009,20 @@ function addSentMessage(to, text) {
 }
 
 // ======================== STATUS ========================
-function setPidDisplay(pid) {
-  const pidEl = document.getElementById('statusPid');
-  if (pid > 0) { pidEl.textContent = `PID ${pid}`; pidEl.style.display = ''; }
-  else pidEl.style.display = 'none';
-}
-
 function updateStatusBadge(status, msg, pid) {
   const badge = document.getElementById('statusBadge');
   const text = document.getElementById('statusText');
   badge.className = 'status-badge';
+  const pidSuffix = (pid > 0) ? ` PID:${pid}` : '';
   if (status === 'running') {
     badge.classList.add('status-badge--running');
-    text.textContent = msg || '● 运行中';
-    setPidDisplay(pid);
+    text.textContent = (msg || '● 运行中') + pidSuffix;
   } else if (status === 'starting') {
     badge.classList.add('status-badge--starting');
     text.textContent = '启动中...';
-    setPidDisplay(0);
   } else {
     badge.classList.add('status-badge--stopped');
     text.textContent = msg || '● 已停止';
-    setPidDisplay(0);
   }
 }
 
@@ -1185,10 +1169,9 @@ async function pollCheck() {
   try {
     const v = await api('/api/check');
 
-    // First poll: do full refresh, set PID
+    // First poll: do full refresh
     if (!lastVersions) {
       lastVersions = v;
-      setPidDisplay(v.pid);
       await refreshAll();
       return;
     }
@@ -1201,10 +1184,6 @@ async function pollCheck() {
     lastVersions = v;
 
     if (!needHistory && !needState && !needPending && !needWatcher) return;
-
-    // Always update PID display from check response (most reliable source)
-    if (v.pid > 0) setPidDisplay(v.pid);
-    else document.getElementById('statusPid').style.display = 'none';
 
     if (needHistory) await refreshHistory();
     if (needState) await refreshState();
