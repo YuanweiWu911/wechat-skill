@@ -820,11 +820,12 @@ function buildSessionList() {
     .sort((a, b) => (b.lastTime || '').localeCompare(a.lastTime || ''));
 
   if (sorted.length === 0) {
-    container.innerHTML = '<div class="empty-state" style="padding:40px 20px;gap:4px;"><div class="empty-state-icon">💬</div><div class="empty-state-text" style="font-size:13px;">暂无会话</div></div>';
+    const html = '<div class="empty-state" style="padding:40px 20px;gap:4px;"><div class="empty-state-icon">💬</div><div class="empty-state-text" style="font-size:13px;">暂无会话</div></div>';
+    if (container.innerHTML !== html) container.innerHTML = html;
     return;
   }
 
-  container.innerHTML = sorted.map(s => {
+  const newHtml = sorted.map(s => {
     const isActive = activeSessionId === s.id;
     const initial = s.name.length > 2 ? s.name.slice(-2) : s.name;
     const preview = s.messages.length > 0 ? s.messages[s.messages.length - 1].text : '';
@@ -838,6 +839,7 @@ function buildSessionList() {
       <div class="session-time">${time}</div>
     </div>`;
   }).join('');
+  if (container.innerHTML !== newHtml) container.innerHTML = newHtml;
 
   if (!activeSessionId && sorted.length > 0) {
     activeSessionId = sorted[0].id;
@@ -855,7 +857,8 @@ function renderActiveSession() {
   const nameEl = document.getElementById('chatHeaderName');
 
   if (!activeSessionId || !sessions[activeSessionId]) {
-    container.innerHTML = '<div class="empty-state"><div class="empty-state-icon">💬</div><div class="empty-state-text">选择左侧会话查看消息</div></div>';
+    const html = '<div class="empty-state"><div class="empty-state-icon">💬</div><div class="empty-state-text">选择左侧会话查看消息</div></div>';
+    if (container.innerHTML !== html) container.innerHTML = html;
     nameEl.textContent = '选择会话';
     document.getElementById('chatHeaderStatus').textContent = '';
     return;
@@ -866,7 +869,7 @@ function renderActiveSession() {
   document.getElementById('chatHeaderStatus').textContent = `${session.messages.length} 条消息`;
 
   const msgs = session.messages.sort((a, b) => (a.time || '').localeCompare(b.time || ''));
-  container.innerHTML = msgs.map(m => {
+  const newHtml = msgs.map(m => {
     const isOut = m.direction === 'out' || m.isOutgoing;
     const cls = isOut ? 'msg--out' : 'msg--in';
     const action = m.action || {};
@@ -900,8 +903,10 @@ function renderActiveSession() {
       </div>
     </div>`;
   }).join('');
-
-  container.scrollTop = container.scrollHeight;
+  if (container.innerHTML !== newHtml) {
+    container.innerHTML = newHtml;
+    container.scrollTop = container.scrollHeight;
+  }
 
   // Show/hide input area
   const inputArea = document.getElementById('chatInputArea');
@@ -1202,23 +1207,19 @@ function escapeRegex(s) {
 
 // ======================== POLLING ========================
 let lastVersions = null;
-let lastHistoryStr = '';
-let lastStateStr = '';
 
 async function pollCheck() {
   try {
     const v = await api('/api/check');
 
-    // First poll: do full refresh and cache content
+    // First poll: do full refresh
     if (!lastVersions) {
       lastVersions = v;
       await refreshAll();
-      lastHistoryStr = JSON.stringify(currentChatHistory);
-      lastStateStr = JSON.stringify(currentState);
       return;
     }
 
-    // Check what actually needs fetching
+    // Only fetch and re-render data that actually changed
     const needHistory = v.history !== lastVersions.history;
     const needState = v.state !== lastVersions.state;
     const needPending = v.pending !== lastVersions.pending;
@@ -1227,34 +1228,23 @@ async function pollCheck() {
 
     if (!needHistory && !needState && !needPending && !needWatcher) return;
 
-    // Fetch changed data
     if (needHistory) await refreshHistory();
     if (needState) await refreshState();
     if (needPending) await refreshPending();
     if (needWatcher) await refreshStatus();
 
-    // Content comparison: only re-render DOM if visible data actually changed
-    const newHistoryStr = JSON.stringify(currentChatHistory);
-    const newStateStr = JSON.stringify(currentState);
-
-    if (newHistoryStr !== lastHistoryStr || newStateStr !== lastStateStr) {
-      lastHistoryStr = newHistoryStr;
-      lastStateStr = newStateStr;
-      buildSessionList();
-      renderActiveSession();
-      updateStats();
-    }
+    // buildSessionList and renderActiveSession internally compare HTML
+    // before replacing innerHTML — no flicker even if data changed
+    buildSessionList();
+    renderActiveSession();
+    updateStats();
   } catch {
     await refreshAll();
-    lastHistoryStr = JSON.stringify(currentChatHistory);
-    lastStateStr = JSON.stringify(currentState);
   }
 }
 
 function startPolling() {
   refreshAll();
-  lastHistoryStr = JSON.stringify(currentChatHistory);
-  lastStateStr = JSON.stringify(currentState);
   pollInterval = setInterval(pollCheck, 5000);
 }
 
