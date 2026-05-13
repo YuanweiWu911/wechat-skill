@@ -695,16 +695,17 @@ function buildSessionList() {
     if (!sessions[uid]) {
       sessions[uid] = { id: uid, name: uid, messages: [], lastTime: '' };
     }
+    const msgTime = lifecycle.receivedAt || lifecycle.lastAttemptAt;
     sessions[uid].messages.push({
       id, status: lifecycle.status,
       text: lifecycle.originalText || '',
-      time: lifecycle.lastAttemptAt,
+      time: msgTime,
       action: lifecycle.cachedAction,
       fromUserId: lifecycle.fromUserId,
       direction: 'in',
     });
-    if (lifecycle.lastAttemptAt > sessions[uid].lastTime || !sessions[uid].lastTime) {
-      sessions[uid].lastTime = lifecycle.lastAttemptAt;
+    if (msgTime > sessions[uid].lastTime || !sessions[uid].lastTime) {
+      sessions[uid].lastTime = msgTime;
     }
   }
 
