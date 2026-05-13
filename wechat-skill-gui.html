@@ -1017,24 +1017,28 @@ function addSentMessage(to, text) {
 }
 
 // ======================== STATUS ========================
+function setPidDisplay(pid) {
+  const pidEl = document.getElementById('statusPid');
+  if (pid > 0) { pidEl.textContent = `PID ${pid}`; pidEl.style.display = ''; }
+  else pidEl.style.display = 'none';
+}
+
 function updateStatusBadge(status, msg, pid) {
   const badge = document.getElementById('statusBadge');
   const text = document.getElementById('statusText');
-  const pidEl = document.getElementById('statusPid');
   badge.className = 'status-badge';
   if (status === 'running') {
     badge.classList.add('status-badge--running');
     text.textContent = msg || '● 运行中';
-    if (pid > 0) { pidEl.textContent = `PID ${pid}`; pidEl.style.display = ''; }
-    else { pidEl.style.display = 'none'; }
+    setPidDisplay(pid);
   } else if (status === 'starting') {
     badge.classList.add('status-badge--starting');
     text.textContent = '启动中...';
-    pidEl.style.display = 'none';
+    setPidDisplay(0);
   } else {
     badge.classList.add('status-badge--stopped');
     text.textContent = msg || '● 已停止';
-    pidEl.style.display = 'none';
+    setPidDisplay(0);
   }
 }
 
@@ -1181,9 +1185,10 @@ async function pollCheck() {
   try {
     const v = await api('/api/check');
 
-    // First poll: do full refresh
+    // First poll: do full refresh, set PID
     if (!lastVersions) {
       lastVersions = v;
+      setPidDisplay(v.pid);
       await refreshAll();
       return;
     }
@@ -1196,6 +1201,10 @@ async function pollCheck() {
     lastVersions = v;
 
     if (!needHistory && !needState && !needPending && !needWatcher) return;
+
+    // Always update PID display from check response (most reliable source)
+    if (v.pid > 0) setPidDisplay(v.pid);
+    else document.getElementById('statusPid').style.display = 'none';
 
     if (needHistory) await refreshHistory();
     if (needState) await refreshState();
