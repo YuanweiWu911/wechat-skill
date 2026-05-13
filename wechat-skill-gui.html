@@ -127,6 +127,13 @@ html, body {
 .status-badge--stopped .status-dot { background: var(--red); }
 .status-badge--starting .status-dot { background: var(--amber); animation: pulse-dot 1s ease-in-out infinite; }
 
+.status-pid {
+  margin-left: 2px;
+  font-size: 11px; font-weight: 400;
+  opacity: 0.7;
+  font-family: monospace;
+}
+
 @keyframes pulse-dot {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.3; }
@@ -505,6 +512,7 @@ html, body {
       <span class="status-badge" id="statusBadge">
         <span class="status-dot"></span>
         <span id="statusText">检查中...</span>
+        <span id="statusPid" class="status-pid" style="display:none"></span>
       </span>
       <button class="btn btn--icon btn--ghost" id="themeToggle" onclick="toggleTheme()" title="切换配色">☀</button>
       <button class="btn btn--icon btn--ghost" onclick="refreshAll()" title="刷新">⟳</button>
@@ -730,7 +738,7 @@ async function refreshStatus() {
   try {
     const data = await api('/api/status');
     watcherStatus = data.running ? 'running' : 'stopped';
-    updateStatusBadge(watcherStatus, data.message || '');
+    updateStatusBadge(watcherStatus, data.message || '', data.pid || 0);
     document.getElementById('btnStart').disabled = data.running;
     document.getElementById('btnStop').disabled = !data.running;
     document.getElementById('btnRestart').disabled = !data.running;
@@ -1013,19 +1021,24 @@ function addSentMessage(to, text) {
 }
 
 // ======================== STATUS ========================
-function updateStatusBadge(status, msg) {
+function updateStatusBadge(status, msg, pid) {
   const badge = document.getElementById('statusBadge');
   const text = document.getElementById('statusText');
+  const pidEl = document.getElementById('statusPid');
   badge.className = 'status-badge';
   if (status === 'running') {
     badge.classList.add('status-badge--running');
     text.textContent = msg || '● 运行中';
+    if (pid > 0) { pidEl.textContent = `PID ${pid}`; pidEl.style.display = ''; }
+    else { pidEl.style.display = 'none'; }
   } else if (status === 'starting') {
     badge.classList.add('status-badge--starting');
     text.textContent = '启动中...';
+    pidEl.style.display = 'none';
   } else {
     badge.classList.add('status-badge--stopped');
     text.textContent = msg || '● 已停止';
+    pidEl.style.display = 'none';
   }
 }
 
@@ -1223,7 +1236,7 @@ async function pollCheck() {
     const needHistory = v.history !== lastVersions.history;
     const needState = v.state !== lastVersions.state;
     const needPending = v.pending !== lastVersions.pending;
-    const needWatcher = v.watcher !== lastVersions.watcher;
+    const needWatcher = v.watcher !== lastVersions.watcher || v.pid !== lastVersions.pid;
     lastVersions = v;
 
     if (!needHistory && !needState && !needPending && !needWatcher) return;

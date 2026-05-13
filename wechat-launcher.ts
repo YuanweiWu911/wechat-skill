@@ -39,16 +39,20 @@ log(`PID_PATH=${PID_PATH}`);
 // ═══════════════════════════════════════════════════════
 
 function isWatcherRunning(): boolean {
-  if (!existsSync(PID_PATH)) return false;
+  return getWatcherPid() !== 0;
+}
+
+function getWatcherPid(): number {
+  if (!existsSync(PID_PATH)) return 0;
   try {
     const raw = readFileSync(PID_PATH, "utf-8").trim();
     const pid = parseInt(raw, 10);
-    if (!Number.isFinite(pid) || pid <= 0) return false;
+    if (!Number.isFinite(pid) || pid <= 0) return 0;
     const r = spawnSync("tasklist", ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"], {
       encoding: "utf-8", timeout: 5000, windowsHide: true,
     });
-    return r.stdout.includes(`"${pid}"`);
-  } catch { return false; }
+    return r.stdout.includes(`"${pid}"`) ? pid : 0;
+  } catch { return 0; }
 }
 
 function getDataVersions() {
@@ -60,6 +64,7 @@ function getDataVersions() {
     state: mtime(STATE_PATH),
     pending: mtime(PENDING_PATH),
     watcher: isWatcherRunning(),
+    pid: getWatcherPid(),
   };
 }
 
@@ -191,10 +196,11 @@ async function handleRequest(req: Request): Promise<Response> {
 
   // Status
   if (route === "status" && method === "GET") {
-    const running = isWatcherRunning();
+    const pid = getWatcherPid();
+    const running = pid !== 0;
     const state = loadState();
     const pending = loadPending().filter((p: any) => p.status === "pending" || !p.status);
-    return json({ running, message: running ? "Watcher 运行中" : "Watcher 已停止", pendingCount: pending.length });
+    return json({ running, pid, message: running ? "Watcher 运行中" : "Watcher 已停止", pendingCount: pending.length });
   }
 
   // Watcher control
