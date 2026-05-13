@@ -243,31 +243,80 @@ async function handleRequest(req: Request): Promise<Response> {
 // ═══════════════════════════════════════════════════════
 
 async function main() {
-  log("");
+  const args = process.argv.slice(2);
+
+  // No args (double-click): launch system tray and exit
+  if (args.length === 0) {
+    const trayExe = join(PROJ, ".claude", "hooks", "wechat-tray.exe");
+    if (!existsSync(trayExe)) {
+      log("Tray exe not found, falling back to console mode");
+      log("Compile it: \"$env:windir\\Microsoft.NET\\Framework\\v4.0.30319\\csc.exe\" /nologo /target:winexe /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /out:.claude\\hooks\\wechat-tray.exe .claude\\hooks\\wechat-tray.cs");
+      // Fall through to console mode
+    } else {
+      log("Starting in tray mode (background + notification icon)...");
+      const child = spawn(trayExe, ["-ProjectRoot", PROJ], {
+        cwd: PROJ,
+        stdio: "ignore",
+        windowsHide: true,
+        detached: true,
+      });
+      child.unref();
+      log("Tray mode active, this window will close now.");
+      process.exit(0);
+    }
+  }
+
+  // --tray mode: explicit tray launch (same as no-args)
+  if (args.includes("--tray")) {
+    const trayExe = join(PROJ, ".claude", "hooks", "wechat-tray.exe");
+    if (!existsSync(trayExe)) {
+      log(`Tray exe not found: ${trayExe}`);
+      log(`Compile it first with:`);
+      log(`  "C:\\Windows\\Microsoft.NET\\Framework\\v4.0.30319\\csc.exe" /nologo /target:winexe /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /out:.claude\\hooks\\wechat-tray.exe .claude\\hooks\\wechat-tray.cs`);
+      process.exit(1);
+    }
+    log("Launching system tray...");
+    const child = spawn(trayExe, ["-ProjectRoot", PROJ], {
+      cwd: PROJ,
+      stdio: "ignore",
+      windowsHide: true,
+      detached: true,
+    });
+    child.unref();
+    log("Tray launched (PID: " + child.pid + ")");
+    process.exit(0);
+  }
+
+  // --hidden mode: used by tray script, no logs to console
+  const hidden = args.includes("--hidden");
+
+  if (!hidden) log("");
 
   // 1. Start watcher
   const watcherOk = await startWatcher();
-  log(watcherOk ? "✓ Watcher: OK" : "⚠ Watcher: FAILED (continuing)");
+  if (!hidden) log(watcherOk ? "✓ Watcher: OK" : "⚠ Watcher: FAILED (continuing)");
 
   // 2. Start built-in HTTP server
-  log("Starting built-in GUI server...");
+  if (!hidden) log("Starting built-in GUI server...");
   try {
     server = Bun.serve({
       port: PORT,
       fetch: handleRequest,
     });
-    log(`✓ GUI server: http://localhost:${PORT}`);
+    if (!hidden) log(`✓ GUI server: http://localhost:${PORT}`);
   } catch (e: any) {
     log(`✗ GUI server failed: ${e.message}`);
     return;
   }
 
-  // 3. Open browser
-  log("Opening browser...");
-  try {
-    spawnSync("cmd.exe", ["/c", "start", "", `http://localhost:${PORT}`], { timeout: 8000, windowsHide: true });
-    log("✓ Browser opened");
-  } catch { log("⚠ Could not open browser"); }
+  // 3. Open browser (only in non-hidden mode)
+  if (!hidden) {
+    log("Opening browser...");
+    try {
+      spawnSync("cmd.exe", ["/c", "start", "", `http://localhost:${PORT}`], { timeout: 8000, windowsHide: true });
+      log("✓ Browser opened");
+    } catch { log("⚠ Could not open browser"); }
+  }
 
   log("");
   log("========================================");
