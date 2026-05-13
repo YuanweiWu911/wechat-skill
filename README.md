@@ -50,9 +50,9 @@
 - `wechat-launcher.exe` — 编译后的独立可执行文件（双击即用）
 - `wechat-gui-server.ts` — 分离式 Bun 后端服务器（开发模式用）
 - `wechat-skill-gui.html` — 单页面 GUI 前端
-- `start-wechat-tray.bat` — 系统托盘启动脚本
 - `.claude/hooks/wechat-tray.cs` — 系统托盘 C# 源码
 - `.claude/hooks/wechat-tray.exe` — 编译后的托盘可执行文件
+- `.claude/hooks/wechat-tray.ico` — 托盘图标
 
 ## 使用方式
 
@@ -95,7 +95,7 @@
 
 ### 系统托盘模式（后台静默运行）
 
-双击 `start-wechat-tray.bat` 可以无窗口后台运行，任务栏通知区域出现图标：
+直接双击 `wechat-launcher.exe` 进入无窗口后台运行，任务栏通知区域出现图标：
 
 - **左键单击** — 打开 GUI
 - **右键菜单** — Open GUI / Restart Watcher / Exit
@@ -106,8 +106,7 @@
 | 文件 | 说明 |
 |------|------|
 | `.claude/hooks/wechat-tray.cs` | 系统托盘 C# 源码 |
-| `.claude/hooks/wechat-tray.exe` | 编译后的托盘可执行文件（约 5KB） |
-| `start-wechat-tray.bat` | 双击启动托盘模式 |
+| `.claude/hooks/wechat-tray.exe` | 编译后的托盘可执行文件（约 8KB） |
 
 编译托盘 exe（使用 Windows 内置 .NET Framework csc.exe）：
 
