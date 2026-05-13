@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { existsSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
@@ -42,21 +42,25 @@ function psRun(script: string, args: string[] = []): { stdout: string; stderr: s
 }
 
 function isWatcherRunning(): boolean {
-  if (!existsSync(PID_PATH)) return false;
+  return getWatcherPid() !== 0;
+}
+
+function getWatcherPid(): number {
+  if (!existsSync(PID_PATH)) return 0;
   try {
     const pidRaw = readFileSync(PID_PATH, "utf-8").trim();
     const pid = parseInt(pidRaw, 10);
-    if (!Number.isFinite(pid) || pid <= 0) return false;
+    if (!Number.isFinite(pid) || pid <= 0) return 0;
 
     const result = spawnSync("tasklist", ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"], {
       encoding: "utf-8",
       timeout: 5000,
       windowsHide: true,
     });
-    if (result.status !== 0) return false;
-    return result.stdout.includes(`"${pid}"`);
+    if (result.status !== 0) return 0;
+    return result.stdout.includes(`"${pid}"`) ? pid : 0;
   } catch {
-    return false;
+    return 0;
   }
 }
 
@@ -190,14 +194,30 @@ async function handleRequest(req: Request): Promise<Response> {
   // GET /api/status
   if (route === "status" && method === "GET") {
     const running = isWatcherRunning();
+    const pid = getWatcherPid();
     const state = loadState();
     const pendingItems = loadPending().filter((p) => p.status === "pending" || !p.status);
     return jsonResponse({
       running,
+      pid,
       message: running ? "Watcher 运行中" : "Watcher 已停止",
       pidExists: existsSync(PID_PATH),
       pendingCount: pendingItems.length,
       lastStartedAt: state.lastStartedAt || null,
+    });
+  }
+
+  // GET /api/check — lightweight change-detection for GUI polling
+  if (route === "check" && method === "GET") {
+    function mtime(path: string): number {
+      try { return statSync(path).mtimeMs; } catch { return 0; }
+    }
+    return jsonResponse({
+      history: mtime(HISTORY_PATH),
+      state: mtime(STATE_PATH),
+      pending: mtime(PENDING_PATH),
+      watcher: isWatcherRunning(),
+      pid: getWatcherPid(),
     });
   }
 
