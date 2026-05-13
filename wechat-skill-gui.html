@@ -1158,28 +1158,24 @@ async function doHistorySearch() {
   const container = document.getElementById('historySearchResults');
   if (!q) { container.innerHTML = ''; return; }
 
-  container.innerHTML = '<div style="color:var(--text-muted);font-size:13px;">搜索中...</div>';
+  const lower = q.toLowerCase();
+  const results = currentChatHistory.filter(r => (r.text || '').toLowerCase().includes(lower)).slice(-100);
 
-  try {
-    const results = await api(`/api/history/search?q=${encodeURIComponent(q)}`);
-    if (results.length === 0) {
-      container.innerHTML = '<div style="color:var(--text-muted);font-size:13px;padding:20px 0;">未找到匹配结果</div>';
-      return;
-    }
-    container.innerHTML = results.map(r => {
-      const text = escapeHtml(r.text || '');
-      const highlighted = text.replace(
-        new RegExp(escapeRegex(q), 'gi'),
-        m => `<span class="highlight">${m}</span>`
-      );
-      return `<div class="search-result-item" onclick="selectSession('${escapeHtml(r.fromUserId || r.to || '')}');closeSearchModal();">
-        <div>${highlighted}</div>
-        <div class="search-result-meta">${escapeHtml(r.fromUserId || r.to || '')} · ${formatTime(r.time)} · ${r.direction === 'out' ? '发送' : '接收'}</div>
-      </div>`;
-    }).join('');
-  } catch (e) {
-    container.innerHTML = '<div style="color:var(--red);font-size:13px;">搜索失败: ' + e.message + '</div>';
+  if (results.length === 0) {
+    container.innerHTML = '<div style="color:var(--text-muted);font-size:13px;padding:20px 0;">未找到匹配结果</div>';
+    return;
   }
+  container.innerHTML = results.map(r => {
+    const text = escapeHtml(r.text || '');
+    const highlighted = text.replace(
+      new RegExp(escapeRegex(q), 'gi'),
+      m => `<span class="highlight">${m}</span>`
+    );
+    return `<div class="search-result-item" onclick="selectSession('${escapeHtml(r.fromUserId || r.to || '')}');closeSearchModal();">
+      <div>${highlighted}</div>
+      <div class="search-result-meta">${escapeHtml(r.fromUserId || r.to || '')} · ${formatTime(r.time)} · ${r.direction === 'out' ? '发送' : '接收'}</div>
+    </div>`;
+  }).join('');
 }
 
 // ======================== TOAST ========================
