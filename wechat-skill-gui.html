@@ -455,45 +455,6 @@ html, body {
 .approval-item-meta { font-size: 11px; color: var(--text-muted); margin-bottom: 8px; }
 .approval-item-actions { display: flex; gap: 6px; }
 
-/* Modal */
-.modal-overlay {
-  display: none; position: fixed; inset: 0;
-  background: rgba(0,0,0,0.6); backdrop-filter: blur(4px);
-  z-index: 200; align-items: center; justify-content: center;
-}
-.modal-overlay--visible { display: flex; }
-.modal {
-  background: var(--bg-elevated); border: 1px solid var(--border-color);
-  border-radius: var(--radius-lg); box-shadow: var(--shadow-elevated);
-  width: 520px; max-width: 90vw; max-height: 80vh;
-  display: flex; flex-direction: column;
-  animation: modal-in 200ms ease-out both;
-}
-@keyframes modal-in {
-  from { opacity: 0; transform: scale(0.95) translateY(10px); }
-  to { opacity: 1; transform: scale(1) translateY(0); }
-}
-.modal-header {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 14px 18px; border-bottom: 1px solid var(--border-color);
-}
-.modal-title { font-size: 15px; font-weight: 600; }
-.modal-body { padding: 18px; overflow-y: auto; flex: 1; }
-.modal-footer { padding: 12px 18px; border-top: 1px solid var(--border-color);
-  display: flex; justify-content: flex-end; gap: 8px; }
-
-/* History search results */
-.search-result-item {
-  padding: 10px 12px; border-radius: var(--radius-sm);
-  background: var(--bg-surface); border: 1px solid var(--border-light);
-  margin-bottom: 8px; font-size: 13px;
-  cursor: pointer; transition: var(--transition);
-}
-.search-result-item:hover { background: var(--bg-surface-hover); }
-.search-result-item .highlight {
-  color: var(--accent); font-weight: 500;
-}
-.search-result-meta { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
 </style>
 </head>
 <body>
@@ -603,7 +564,6 @@ html, body {
       <button class="btn btn--sm" onclick="toggleApprovalPanel()">
         ⚠ 待审核 <span class="stat-value" id="pendingCount" style="font-size:11px">0</span>
       </button>
-      <button class="btn btn--sm btn--ghost" onclick="showHistorySearch()">⌕ 搜索</button>
     </div>
   </div>
 </div>
@@ -616,26 +576,6 @@ html, body {
   </div>
   <div class="approval-panel-list" id="approvalList">
     <div style="padding: 20px; text-align: center; color: var(--text-muted); font-size: 13px;">暂无待审核请求</div>
-  </div>
-</div>
-
-<!-- History Search Modal -->
-<div class="modal-overlay" id="searchModal">
-  <div class="modal">
-    <div class="modal-header">
-      <span class="modal-title">⌕ 历史消息搜索</span>
-      <button class="btn btn--sm btn--ghost" onclick="closeSearchModal()">✕</button>
-    </div>
-    <div class="modal-body">
-      <div class="search-box" style="margin-bottom: 14px;">
-        <span class="search-icon">⌕</span>
-        <input type="text" id="historySearchInput" placeholder="输入关键词搜索历史消息..." style="padding: 10px 12px 10px 34px; font-size: 14px;" oninput="debounceHistorySearch()">
-      </div>
-      <div id="historySearchResults" style="max-height: 400px; overflow-y: auto;"></div>
-    </div>
-    <div class="modal-footer">
-      <button class="btn" onclick="closeSearchModal()">关闭</button>
-    </div>
   </div>
 </div>
 
@@ -1132,48 +1072,6 @@ function doSearch() {
         <div class="session-preview">${escapeHtml(preview.slice(0, 40))}</div>
       </div>
       <div class="session-time">${time}</div>
-    </div>`;
-  }).join('');
-}
-
-function showHistorySearch() {
-  document.getElementById('searchModal').classList.add('modal-overlay--visible');
-  document.getElementById('historySearchInput').value = '';
-  document.getElementById('historySearchResults').innerHTML = '';
-  setTimeout(() => document.getElementById('historySearchInput').focus(), 100);
-}
-
-function closeSearchModal() {
-  document.getElementById('searchModal').classList.remove('modal-overlay--visible');
-}
-
-let historySearchTimer = null;
-function debounceHistorySearch() {
-  clearTimeout(historySearchTimer);
-  historySearchTimer = setTimeout(doHistorySearch, 300);
-}
-
-async function doHistorySearch() {
-  const q = document.getElementById('historySearchInput').value.trim();
-  const container = document.getElementById('historySearchResults');
-  if (!q) { container.innerHTML = ''; return; }
-
-  const lower = q.toLowerCase();
-  const results = currentChatHistory.filter(r => (r.text || '').toLowerCase().includes(lower)).slice(-100);
-
-  if (results.length === 0) {
-    container.innerHTML = '<div style="color:var(--text-muted);font-size:13px;padding:20px 0;">未找到匹配结果</div>';
-    return;
-  }
-  container.innerHTML = results.map(r => {
-    const text = escapeHtml(r.text || '');
-    const highlighted = text.replace(
-      new RegExp(escapeRegex(q), 'gi'),
-      m => `<span class="highlight">${m}</span>`
-    );
-    return `<div class="search-result-item" onclick="selectSession('${escapeHtml(r.fromUserId || r.to || '')}');closeSearchModal();">
-      <div>${highlighted}</div>
-      <div class="search-result-meta">${escapeHtml(r.fromUserId || r.to || '')} · ${formatTime(r.time)} · ${r.direction === 'out' ? '发送' : '接收'}</div>
     </div>`;
   }).join('');
 }
