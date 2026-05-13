@@ -323,11 +323,12 @@ async function handleRequest(req: Request): Promise<Response> {
       const file = formData.get("file");
       if (!to || !file) return json({ error: "Missing to or file" }, 400);
 
-      // Save uploaded file to temp
-      const tmpFile = join(PROJ, ".claude", `wechat-send-tmp-${Date.now()}`);
+      const fileName = (file as any).name || "file";
+      const ext = fileName.includes(".") ? fileName.slice(fileName.lastIndexOf(".")) : "";
+
+      const tmpFile = join(PROJ, ".claude", `wechat-send-tmp-${Date.now()}${ext}`);
       const buf = await file.arrayBuffer();
       writeFileSync(tmpFile, Buffer.from(buf));
-      const fileName = (file as any).name || "file";
 
       const sendScript = join(PROJ, "wechat-send.ts");
       if (!existsSync(sendScript)) {
