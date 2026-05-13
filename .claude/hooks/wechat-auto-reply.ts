@@ -18,6 +18,7 @@ interface InboxEntry {
   contextToken?: string;
   attachmentPath?: string;
   attachmentType?: string;
+  attachmentName?: string;
 }
 
 interface MessageLifecycle {
@@ -329,6 +330,13 @@ async function importWeixinModules(pluginRoot: string) {
     CDN_BASE_URL: string;
     DEFAULT_BASE_URL: string;
   }>("src/accounts.ts");
+  const media = await load<{
+    downloadAndDecrypt(params: {
+      encryptQueryParam: string;
+      aesKey: string;
+      cdnBaseUrl: string;
+    }): Promise<Buffer>;
+  }>("src/media.ts");
   const pairing = await load<{
     isAllowed(userId: string): boolean;
     addPendingPairing(userId: string): string;
@@ -343,6 +351,7 @@ async function importWeixinModules(pluginRoot: string) {
     ...accounts,
     ...pairing,
     ...types,
+    ...media,
     getConfig: apiMod.getConfig,
     getUpdates: apiMod.getUpdates,
   };
@@ -1325,6 +1334,9 @@ async function startWeixinPollLoop(params: {
   onEntry: (entry: InboxEntry) => Promise<void>;
   abortSignal: AbortSignal;
   wrappedSendText: (params: { to: string; text: string; contextToken: string }) => Promise<boolean>;
+  downloadAndDecrypt?: (params: { encryptQueryParam: string; aesKey: string; cdnBaseUrl: string }) => Promise<Buffer>;
+  cdnBaseUrl?: string;
+  mediaDir?: string;
 }): Promise<void> {
   const {
     config,
@@ -1343,6 +1355,9 @@ async function startWeixinPollLoop(params: {
     onEntry,
     abortSignal,
     wrappedSendText,
+    downloadAndDecrypt,
+    cdnBaseUrl: cdnUrlFromParam,
+    mediaDir: mediaDirFromParam,
   } = params;
 
   let cursor = loadCursor(config.cursorPath);
@@ -1394,7 +1409,9 @@ async function startWeixinPollLoop(params: {
         }
 
         let textContent = "";
-        let hasAttachment = false;
+        let attachmentPath = "";
+        let attachmentType = "";
+        let attachmentName = "";
         const items: any[] = Array.isArray(msg.item_list) ? msg.item_list : [];
         for (const item of items) {
           if (item?.type === itemTypeText && item?.text_item?.text) {
@@ -1406,19 +1423,51 @@ async function startWeixinPollLoop(params: {
             continue;
           }
           if (item?.type === itemTypeImage || item?.type === itemTypeFile || item?.type === itemTypeVideo || item?.type === itemTypeVoice) {
-            hasAttachment = true;
+            const mediaItem = item?.image_item || item?.file_item || item?.video_item || item?.voice_item;
+            const cdn = mediaItem?.media;
+            const displayName = item?.file_item?.file_name || "";
+            if (cdn?.encrypt_query_param && cdn?.aes_key && downloadAndDecrypt && cdnUrlFromParam && mediaDirFromParam) {
+              try {
+                const fileExt = item?.type === itemTypeImage ? ".jpg" :
+                                item?.type === itemTypeVideo ? ".mp4" :
+                                item?.type === itemTypeVoice ? ".silk" :
+                                (displayName ? displayName.slice(displayName.lastIndexOf(".")) : ".bin");
+                const timeStr = msg.create_time_ms ? String(msg.create_time_ms) : String(Date.now());
+                const rawBuf = await downloadAndDecrypt({
+                  encryptQueryParam: cdn.encrypt_query_param,
+                  aesKey: cdn.aes_key,
+                  cdnBaseUrl: cdnUrlFromParam,
+                });
+                const safeName = `${timeStr}_${fromUserId}_${item.message_id || Date.now()}${fileExt}`;
+                writeFileSync(join(mediaDirFromParam, safeName), rawBuf);
+                attachmentPath = safeName;
+                attachmentName = displayName;
+                if (item?.type === itemTypeImage) attachmentType = "image";
+                else if (item?.type === itemTypeVideo) attachmentType = "video";
+                else if (item?.type === itemTypeVoice) attachmentType = "voice";
+                else attachmentType = "file";
+                const typeLabel = { image: "图片", file: "文件", video: "视频", voice: "语音" }[attachmentType] || "附件";
+                if (!textContent) textContent = `[${typeLabel}]`;
+              } catch (e) {
+                logLine(config, `Media download failed: ${e instanceof Error ? e.message : String(e)}`);
+              }
+            } else {
+              if (!textContent) {
+                if (item?.type === itemTypeImage) textContent = "[图片]";
+                else if (item?.type === itemTypeFile) textContent = `[文件: ${displayName || "未知"}]`;
+                else if (item?.type === itemTypeVideo) textContent = "[视频]";
+                else if (item?.type === itemTypeVoice) textContent = "[语音]";
+              }
+            }
           }
         }
-
-        if (!textContent && hasAttachment) {
-          textContent = "(media attachment)";
-        }
-        if (!textContent) continue;
 
         const messageId = String(msg.message_id || "");
         const id = messageId ? `msg:${messageId}` : `msg:${Date.now()}:${Math.random().toString(16).slice(2)}`;
         const receivedAt = msg.create_time_ms ? new Date(Number(msg.create_time_ms)).toISOString() : new Date().toISOString();
         const effectiveContextToken = contextToken || contextTokens.get(fromUserId) || "";
+
+        if (!textContent && !attachmentPath) continue;
 
         await onEntry({
           id,
@@ -1426,6 +1475,9 @@ async function startWeixinPollLoop(params: {
           fromUserId,
           receivedAt,
           text: textContent,
+          attachmentPath,
+          attachmentType,
+          attachmentName,
           contextToken: effectiveContextToken,
         });
       }
@@ -1491,6 +1543,7 @@ async function main(): Promise<void> {
   let getUpdates: any;
   let isAllowed: any;
   let addPendingPairing: any;
+  let downloadAndDecrypt: any;
   let MessageType: any;
   let MessageItemType: any;
 
@@ -1504,6 +1557,7 @@ async function main(): Promise<void> {
       getUpdates = mods.getUpdates;
       isAllowed = mods.isAllowed;
       addPendingPairing = mods.addPendingPairing;
+      downloadAndDecrypt = mods.downloadAndDecrypt;
       MessageType = mods.MessageType;
       MessageItemType = mods.MessageItemType;
       break;
@@ -1519,6 +1573,8 @@ async function main(): Promise<void> {
   }
 
   const baseUrl = account.baseUrl || DEFAULT_BASE_URL || "https://ilinkai.weixin.qq.com";
+  const mediaDir = join(claudeDir, "wechat-media");
+  ensureDir(mediaDir);
   const wrappedSendText = (params: { to: string; text: string; contextToken: string }) =>
     safeSendText(sendText, account, getUpdates, config, params, 2);
   const wrappedSendMediaFile = (params: { to: string; filePath: string; text: string; contextToken: string }) =>
@@ -1556,6 +1612,9 @@ async function main(): Promise<void> {
     getUpdates,
     abortSignal: controller.signal,
     wrappedSendText,
+    downloadAndDecrypt,
+    cdnBaseUrl: CDN_BASE_URL,
+    mediaDir,
     onEntry: async (entry) => {
       received++;
       appendChatHistory(config, {
@@ -1563,6 +1622,9 @@ async function main(): Promise<void> {
         direction: "in",
         from: entry.fromUserId,
         text: entry.text,
+        attachmentPath: entry.attachmentPath || "",
+        attachmentType: entry.attachmentType || "",
+        attachmentName: entry.attachmentName || "",
       });
       await handleIncomingMessage(config, entry, wrappedSendText, wrappedSendMediaFile);
       if (once && received > 0) {

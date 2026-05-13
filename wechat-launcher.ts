@@ -190,6 +190,27 @@ async function handleRequest(req: Request): Promise<Response> {
   }
 
   const m = url.pathname.match(/^\/api\/(.+)/);
+
+  // Media file serving
+  const mediaMatch = url.pathname.match(/^\/media\/(.+)/);
+  if (mediaMatch) {
+    const mediaDir = join(PROJ, ".claude", "wechat-media");
+    const mediaFile = join(mediaDir, decodeURIComponent(mediaMatch[1]));
+    if (!existsSync(mediaFile)) return text("Not found", 404);
+    const buf = readFileSync(mediaFile);
+    const ext = mediaMatch[1].split(".").pop()?.toLowerCase() || "";
+    const mimeMap: Record<string, string> = {
+      jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif",
+      mp4: "video/mp4", mov: "video/quicktime",
+      pdf: "application/pdf", doc: "application/msword", docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      xls: "application/vnd.ms-excel", xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      txt: "text/plain", csv: "text/csv", json: "application/json",
+      silk: "audio/silk", mp3: "audio/mpeg", wav: "audio/wav", ogg: "audio/ogg",
+    };
+    const mime = mimeMap[ext] || "application/octet-stream";
+    return new Response(buf, { headers: { "Content-Type": mime, ...corsHeaders() } });
+  }
+
   if (!m) return text("Not found", 404);
 
   const route = m[1];

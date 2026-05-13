@@ -812,7 +812,7 @@ function buildSessionList() {
   }
 
   for (const record of currentChatHistory) {
-    const uid = record.to || record.fromUserId || 'unknown';
+    const uid = record.from || record.to || record.fromUserId || 'unknown';
     if (!sessions[uid]) {
       sessions[uid] = { id: uid, name: getDisplayName(uid), messages: [], lastTime: '' };
     }
@@ -824,6 +824,9 @@ function buildSessionList() {
       fromUserId: uid,
       isOutgoing: record.direction === 'out',
       file: record.file,
+      attachmentPath: record.attachmentPath || '',
+      attachmentType: record.attachmentType || '',
+      attachmentName: record.attachmentName || '',
       status: 'replied',
     });
     if ((record.time || '') > sessions[uid].lastTime || !sessions[uid].lastTime) {
@@ -894,7 +897,7 @@ function renderActiveSession() {
     const action = m.action || {};
     const isRisk = action.type === 'risky';
     const isExec = action.type === 'executed' || action.type === 'chat';
-    const hasFile = !!m.file;
+    const hasFile = !!(m.file || m.attachmentPath);
 
     let tagHtml = '';
     if (action.type === 'risky') tagHtml = '<span class="msg-tag msg-tag--risky">⚠ 风险</span>';
@@ -906,9 +909,17 @@ function renderActiveSession() {
     else if (hasFile) bubbleClass += ' msg-bubble--file';
     else if (action.type === 'executed') bubbleClass += ' msg-bubble--executed';
 
-    const bubbleContent = hasFile
-      ? `📎 ${escapeHtml(m.text)}<br><span style="font-size:11px;color:var(--text-muted)">${escapeHtml(m.file)}</span>`
-      : escapeHtml(m.text);
+    let bubbleContent = escapeHtml(m.text);
+    if (m.attachmentPath) {
+      const icon = { image: '🖼', video: '🎬', voice: '🎤', file: '📎' }[m.attachmentType] || '📎';
+      const label = { image: '图片', video: '视频', voice: '语音', file: '文件' }[m.attachmentType] || '附件';
+      const dlName = m.attachmentName || (label + (m.attachmentPath.includes('.') ? m.attachmentPath.slice(m.attachmentPath.lastIndexOf('.')) : ''));
+      const downloadUrl = `/media/${encodeURIComponent(m.attachmentPath)}`;
+      bubbleContent += `<br><a href="${downloadUrl}" target="_blank" class="media-link" style="font-size:12px;color:var(--accent);text-decoration:none;" title="打开 ${label}">${icon} ${escapeHtml(dlName)}</a>`;
+    } else if (m.file) {
+      const downloadUrl = `/media/${encodeURIComponent(m.file)}`;
+      bubbleContent += `<br><a href="${downloadUrl}" target="_blank" class="media-link" style="font-size:12px;color:var(--accent);text-decoration:none;" title="打开文件">📎 ${escapeHtml(m.file)}</a>`;
+    }
 
     return `<div class="msg ${cls}">
       <div class="msg-avatar">${isOut ? 'B' : session.name.slice(-2)}</div>

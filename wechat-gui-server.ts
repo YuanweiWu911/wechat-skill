@@ -118,10 +118,14 @@ function loadState(): StateJson {
 interface ChatRecord {
   time?: string;
   direction?: string;
+  from?: string;
   to?: string;
   fromUserId?: string;
   text?: string;
   file?: string;
+  attachmentPath?: string;
+  attachmentType?: string;
+  attachmentName?: string;
   id?: string;
 }
 
@@ -185,6 +189,24 @@ async function handleRequest(req: Request): Promise<Response> {
 
   // --- API routes ---
   const apiMatch = url.pathname.match(/^\/api\/(.+)/);
+
+  // --- Media file serving ---
+  const mediaMatch = url.pathname.match(/^\/media\/(.+)/);
+  if (mediaMatch) {
+    const mediaFile = join(PROJECT_ROOT, ".claude", "wechat-media", decodeURIComponent(mediaMatch[1]));
+    if (!existsSync(mediaFile)) return textResponse("Not found", 404);
+    const buf = readFileSync(mediaFile);
+    const ext = mediaMatch[1].split(".").pop()?.toLowerCase() || "";
+    const mime = { jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif",
+                   mp4: "video/mp4", mov: "video/quicktime",
+                   pdf: "application/pdf", doc: "application/msword", docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                   xls: "application/vnd.ms-excel", xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                   txt: "text/plain", csv: "text/csv", json: "application/json",
+                   silk: "audio/silk", mp3: "audio/mpeg", wav: "audio/wav", ogg: "audio/ogg",
+    }[ext] || "application/octet-stream";
+    return new Response(buf, { headers: { "Content-Type": mime, ...corsHeaders() } });
+  }
+
   if (!apiMatch) {
     return textResponse("Not found", 404);
   }
