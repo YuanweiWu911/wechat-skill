@@ -1201,9 +1201,48 @@ function escapeRegex(s) {
 }
 
 // ======================== POLLING ========================
+let lastVersions = null;
+
+async function pollCheck() {
+  try {
+    const v = await api('/api/check');
+
+    // First poll: do full refresh
+    if (!lastVersions) {
+      lastVersions = v;
+      await refreshAll();
+      return;
+    }
+
+    // Check what changed
+    const historyChanged = v.history !== lastVersions.history;
+    const stateChanged = v.state !== lastVersions.state;
+    const pendingChanged = v.pending !== lastVersions.pending;
+    const watcherChanged = v.watcher !== lastVersions.watcher;
+    lastVersions = v;
+
+    // Nothing changed → skip visual refresh entirely (no flicker)
+    if (!historyChanged && !stateChanged && !pendingChanged && !watcherChanged) return;
+
+    // Only refresh the parts that actually changed
+    if (historyChanged || stateChanged) {
+      if (historyChanged) await refreshHistory();
+      if (stateChanged) await refreshState();
+      buildSessionList();
+      renderActiveSession();
+      updateStats();
+    }
+    if (pendingChanged) await refreshPending();
+    if (watcherChanged) await refreshStatus();
+  } catch {
+    // On error fall back to full refresh
+    await refreshAll();
+  }
+}
+
 function startPolling() {
   refreshAll();
-  pollInterval = setInterval(refreshAll, 5000);
+  pollInterval = setInterval(pollCheck, 5000);
 }
 
 // ======================== THEME ========================

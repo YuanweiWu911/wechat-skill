@@ -3,7 +3,7 @@
 // Start watcher + built-in HTTP server + open browser.
 // NO external bun dependency needed at runtime.
 
-import { existsSync, readFileSync, readdirSync, appendFileSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, appendFileSync, writeFileSync, rmSync, statSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 
@@ -49,6 +49,18 @@ function isWatcherRunning(): boolean {
     });
     return r.stdout.includes(`"${pid}"`);
   } catch { return false; }
+}
+
+function getDataVersions() {
+  function mtime(path: string): number {
+    try { return statSync(path).mtimeMs; } catch { return 0; }
+  }
+  return {
+    history: mtime(HISTORY_PATH),
+    state: mtime(STATE_PATH),
+    pending: mtime(PENDING_PATH),
+    watcher: isWatcherRunning(),
+  };
 }
 
 function loadState(): any {
@@ -212,6 +224,9 @@ async function handleRequest(req: Request): Promise<Response> {
     ], { cwd: PROJ, encoding: "utf-8", timeout: 15000, windowsHide: true });
     return json({ success: true, message: "已触发轮询" });
   }
+
+  // Lightweight change-detection for GUI polling
+  if (route === "check" && method === "GET") return json(getDataVersions());
 
   // Data
   if (route === "state" && method === "GET") return json(loadState());
