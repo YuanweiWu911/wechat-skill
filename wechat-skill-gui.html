@@ -1202,46 +1202,59 @@ function escapeRegex(s) {
 
 // ======================== POLLING ========================
 let lastVersions = null;
+let lastHistoryStr = '';
+let lastStateStr = '';
 
 async function pollCheck() {
   try {
     const v = await api('/api/check');
 
-    // First poll: do full refresh
+    // First poll: do full refresh and cache content
     if (!lastVersions) {
       lastVersions = v;
       await refreshAll();
+      lastHistoryStr = JSON.stringify(currentChatHistory);
+      lastStateStr = JSON.stringify(currentState);
       return;
     }
 
-    // Check what changed
-    const historyChanged = v.history !== lastVersions.history;
-    const stateChanged = v.state !== lastVersions.state;
-    const pendingChanged = v.pending !== lastVersions.pending;
-    const watcherChanged = v.watcher !== lastVersions.watcher;
+    // Check what actually needs fetching
+    const needHistory = v.history !== lastVersions.history;
+    const needState = v.state !== lastVersions.state;
+    const needPending = v.pending !== lastVersions.pending;
+    const needWatcher = v.watcher !== lastVersions.watcher;
     lastVersions = v;
 
-    // Nothing changed → skip visual refresh entirely (no flicker)
-    if (!historyChanged && !stateChanged && !pendingChanged && !watcherChanged) return;
+    if (!needHistory && !needState && !needPending && !needWatcher) return;
 
-    // Only refresh the parts that actually changed
-    if (historyChanged || stateChanged) {
-      if (historyChanged) await refreshHistory();
-      if (stateChanged) await refreshState();
+    // Fetch changed data
+    if (needHistory) await refreshHistory();
+    if (needState) await refreshState();
+    if (needPending) await refreshPending();
+    if (needWatcher) await refreshStatus();
+
+    // Content comparison: only re-render DOM if visible data actually changed
+    const newHistoryStr = JSON.stringify(currentChatHistory);
+    const newStateStr = JSON.stringify(currentState);
+
+    if (newHistoryStr !== lastHistoryStr || newStateStr !== lastStateStr) {
+      lastHistoryStr = newHistoryStr;
+      lastStateStr = newStateStr;
       buildSessionList();
       renderActiveSession();
       updateStats();
     }
-    if (pendingChanged) await refreshPending();
-    if (watcherChanged) await refreshStatus();
   } catch {
-    // On error fall back to full refresh
     await refreshAll();
+    lastHistoryStr = JSON.stringify(currentChatHistory);
+    lastStateStr = JSON.stringify(currentState);
   }
 }
 
 function startPolling() {
   refreshAll();
+  lastHistoryStr = JSON.stringify(currentChatHistory);
+  lastStateStr = JSON.stringify(currentState);
   pollInterval = setInterval(pollCheck, 5000);
 }
 
