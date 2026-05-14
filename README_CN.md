@@ -42,7 +42,6 @@
 - `.claude/skills/wechat-skill-2/SKILL.md`
 - `.claude/skills/wechat-skill-2/collect-wechat.ps1`
 - `.claude/skills/wechat-skill-2/wechat-approve.ps1`
-- `.claude/skills/wechat-skill-2/weixin-inbox.ps1`
 - `.claude/hooks/wechat-auto-reply.ts`
 - `.claude/hooks/start-wechat-auto.ps1`
 - `.claude/hooks/start-wechat-auto-runner.ps1`

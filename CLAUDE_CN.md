@@ -106,7 +106,6 @@ bun build wechat-launcher.ts --compile --outfile wechat-launcher.exe
 - 风险删除兜底：已确认的简单项目内文件删除，可以由 watcher 本地执行，避免受 Claude 工具沙箱限制影响
 - 文件传输行为：项目内白名单单文件可以直接作为附件发送；超大文件需要先确认；当前只支持按相对路径精确匹配，不支持按文件名模糊搜索
 - 消息入口：`cc-weixin v0.2.1` 通过 `getUpdates` 长轮询，并使用 MCP `notifications/claude/channel` 将消息直接推送为 `<channel source="weixin" ...>` 上下文
-- 兼容桥接：`weixin-inbox.ps1` 现仅作为兼容旧引用的占位脚本，不再负责 inbox 导入或 copy
 - Start 入口行为：`collect-wechat.ps1` 接受 `--start` 作为控制模式参数，通过 `start-wechat-auto.ps1` 启动当前项目 watcher，并直接退出，不再执行 inbox 导入；默认 `/wechat-skill-2` 现在只显示状态，不会隐式启动 watcher
 - Stop 入口行为：`collect-wechat.ps1` 接受 `--stop` 作为控制模式参数，通过 `stop-wechat-auto.ps1` 停止当前项目 watcher，并直接退出，不再执行 inbox 导入
 

@@ -102,7 +102,6 @@ Current watcher/runtime layout:
 - Risk delete fallback: confirmed simple project-local file deletions can be executed locally by the watcher to avoid Claude tool sandbox limitations
 - File transfer behavior: project-local whitelisted single files can be sent as attachments directly; oversized files require confirmation; current matching is exact relative-path matching, not fuzzy filename search
 - Message ingress: `cc-weixin v0.2.1` uses `getUpdates` long polling and MCP `notifications/claude/channel`; messages arrive directly as `<channel source="weixin" ...>` in the chat context
-- Compatibility bridge: `weixin-inbox.ps1` is now a compatibility stub for old references; it no longer imports or copies inbox content
 - Start entry behavior: `collect-wechat.ps1` accepts `--start` as a control-mode argument, starts the project watcher via `start-wechat-auto.ps1`, and exits without running inbox import; default `/wechat-skill-2` is now status-only and does not implicitly start the watcher
 - Stop entry behavior: `collect-wechat.ps1` accepts `--stop` as a control-mode argument, stops the project watcher via `stop-wechat-auto.ps1`, and exits without running inbox import
 
