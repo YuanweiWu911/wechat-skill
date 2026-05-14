@@ -255,6 +255,190 @@ function ensureDir(path: string): void {
   }
 }
 
+// ======================== SESSION MANAGEMENT ========================
+let sessions: Record<string, Session> = {};
+let sessionCursor: SessionCursor = {};
+const messageWindows: Record<string, WindowMessage[]> = {};
+
+function loadSessions(sessionPath: string): void {
+  if (!existsSync(sessionPath)) return;
+  try {
+    const lines = readFileSync(sessionPath, "utf-8").trim().split("\n").filter(Boolean);
+    for (const line of lines) {
+      const s = JSON.parse(line) as Session;
+      sessions[s.id] = s;
+    }
+  } catch { /* G3 */ }
+}
+
+function loadSessionCursor(cursorPath: string): void {
+  if (!existsSync(cursorPath)) return;
+  try {
+    sessionCursor = JSON.parse(readFileSync(cursorPath, "utf-8"));
+  } catch { /* G4 */ }
+}
+
+function saveSessions(sessionPath: string): void {
+  try {
+    const lines = Object.values(sessions).map(s => JSON.stringify(s)).join("\n") + "\n";
+    writeFileSync(sessionPath, lines, "utf-8");
+  } catch { /* G5 */ }
+}
+
+function saveSessionCursor(cursorPath: string): void {
+  try {
+    writeFileSync(cursorPath, JSON.stringify(sessionCursor), "utf-8");
+  } catch { /* G5 */ }
+}
+
+function createSession(userId: string): string {
+  const id = `sess:${userId}:${Date.now()}`;
+  const now = new Date().toISOString();
+  sessions[id] = { id, userId, startedAt: now, lastMessageAt: now, messageCount: 0, summary: "", status: "active" };
+  sessionCursor[userId] = id;
+  return id;
+}
+
+function getActiveSession(userId: string): Session | null {
+  const sid = sessionCursor[userId];
+  if (!sid || !sessions[sid] || sessions[sid].status !== "active") return null;
+  return sessions[sid];
+}
+
+function isSessionExpired(sessionId: string): boolean {
+  const s = sessions[sessionId];
+  if (!s || s.status !== "active") return false;
+  return Date.now() - new Date(s.lastMessageAt).getTime() > SESSION_TTL_MS;
+}
+
+function generateSessionSummary(sessionId: string): string {
+  const msgs = messageWindows[sessionId] || [];
+  if (msgs.length === 0) return "";
+  const topics = new Set<string>();
+  for (const m of msgs) {
+    for (const kw of ["天气", "文件", "PDF", "图片", "查询", "安装", "读取", "搜索", "下载"]) {
+      if (m.text.includes(kw)) topics.add(kw);
+    }
+  }
+  const parts: string[] = [`${msgs.length} 条消息`];
+  if (topics.size) parts.push(`话题: ${[...topics].join(", ")}`);
+  return parts.join(", ");
+}
+
+function closeSession(sessionId: string, reason: Session["closingReason"]): void {
+  const s = sessions[sessionId];
+  if (!s) return;
+  s.summary = generateSessionSummary(sessionId);
+  s.status = "closed";
+  s.closedAt = new Date().toISOString();
+  s.closingReason = reason;
+}
+
+function addMessageToWindow(sessionId: string, text: string, direction: "in" | "out"): void {
+  if (!messageWindows[sessionId]) messageWindows[sessionId] = [];
+  const w = messageWindows[sessionId];
+  w.push({ text, direction, time: new Date().toISOString() });
+  if (w.length > MAX_WINDOW_MESSAGES) w.shift();
+  const s = sessions[sessionId];
+  if (s) { s.messageCount++; s.lastMessageAt = new Date().toISOString(); }
+}
+
+function buildSessionContext(sessionId: string): string {
+  const w = messageWindows[sessionId];
+  if (!w || w.length === 0) return "";
+  const recent = w.slice(-MAX_WINDOW_MESSAGES);
+  const lines: string[] = [];
+  for (const m of recent) {
+    const label = m.direction === "in" ? "用户" : "Bot";
+    const snippet = m.direction === "out" ? m.text.slice(0, 80) : m.text;
+    lines.push(`${label}: ${snippet}`);
+  }
+  return lines.join("\n");
+}
+
+// ======================== MEMORY MANAGEMENT ========================
+let memoryMap: UserMemoryMap = {};
+let memoryDigestCache: Record<string, string> = {};
+let lastInjectedMemory: Record<string, string> = {};
+
+function loadMemory(memoryPath: string): void {
+  if (!existsSync(memoryPath)) return;
+  try { memoryMap = JSON.parse(readFileSync(memoryPath, "utf-8")); }
+  catch { /* G2 */ }
+}
+
+function loadMemoryDigest(digestPath: string): void {
+  if (!existsSync(digestPath)) return;
+  try {
+    const lines = readFileSync(digestPath, "utf-8").trim().split("\n").filter(Boolean);
+    for (const line of lines) {
+      const [userId, hash] = line.split(" ");
+      if (userId && hash) memoryDigestCache[userId] = hash;
+    }
+  } catch { /* G4 */ }
+}
+
+function saveMemory(memoryPath: string): void {
+  try { writeFileSync(memoryPath, JSON.stringify(memoryMap), "utf-8"); }
+  catch { /* G5 */ }
+}
+
+function saveMemoryDigest(digestPath: string): void {
+  try {
+    const lines = Object.entries(memoryDigestCache).map(([k, v]) => `${k} ${v}`).join("\n") + "\n";
+    writeFileSync(digestPath, lines, "utf-8");
+  } catch { /* G5 */ }
+}
+
+function computeMemoryHash(userId: string): string {
+  const mem = memoryMap[userId];
+  if (!mem) return "";
+  return Bun.hash(JSON.stringify(mem)).toString(16);
+}
+
+function isMemoryDigestHit(userId: string): boolean {
+  const current = computeMemoryHash(userId);
+  if (!current) return false;
+  return memoryDigestCache[userId] === current;
+}
+
+function buildMemoryContextL1(userId: string): string {
+  const mem = memoryMap[userId];
+  if (!mem) return "";
+  const parts: string[] = [];
+  if (mem.interests.length) parts.push(`兴趣: ${mem.interests.join(", ")}`);
+  if (mem.profile) parts.push(`画像: ${mem.profile}`);
+  if (mem.preferences.length) parts.push(`偏好: ${mem.preferences.join(", ")}`);
+  if (mem.notes.length) parts.push(`备注: ${mem.notes.slice(-3).join("; ")}`);
+  let ctx = parts.join("\n");
+  if (ctx.length > MEMORY_L1_CHARS) ctx = ctx.slice(0, MEMORY_L1_CHARS - 3) + "...";
+  return ctx;
+}
+
+function getMemoryContext(userId: string): string {
+  if (isMemoryDigestHit(userId) && lastInjectedMemory[userId] !== undefined) {
+    return lastInjectedMemory[userId];
+  }
+  const ctx = buildMemoryContextL1(userId);
+  memoryDigestCache[userId] = computeMemoryHash(userId);
+  lastInjectedMemory[userId] = ctx;
+  return ctx;
+}
+
+function ensureUserMemory(userId: string): void {
+  if (!memoryMap[userId]) {
+    memoryMap[userId] = {
+      userId,
+      updatedAt: new Date().toISOString(),
+      interests: [],
+      stats: { totalInteractions: 0, firstSeenAt: new Date().toISOString(), lastSeenAt: new Date().toISOString(), activeHours: [], topicsMentioned: {} },
+      preferences: [],
+      profile: "",
+      notes: [],
+    };
+  }
+}
+
 function loadState(statePath: string): AutoReplyState {
   if (!existsSync(statePath)) {
     return { messageStates: {}, deadLetterIds: [] };
@@ -456,10 +640,24 @@ const RISKY_EXECUTE_SYSTEM_PROMPT = [
   "铁律：只输出一行合法JSON，绝不要任何额外文字。",
 ].join("\n");
 
+const MEMORY_UPDATE_PROMPT = [
+  "你是用户记忆管理器。根据本次会话摘要，更新用户记忆。只修改有变化的字段，不变字段保持原值。",
+  "输出必须是合法 JSON，格式: {\"interests\": [...], \"stats\": {...}, \"preferences\": [...], \"profile\": \"...\", \"notes\": [...]}",
+  "铁律：只输出 JSON，不要任何额外文字。",
+].join("\n");
+
 // --- Dynamic stdin messages (only user-specific text, changed per call) ---
 
 function buildClassifyStdin(entry: InboxEntry): string {
   return `用户从微信发来消息："${entry.text}"`;
+}
+
+function buildClassifySystemPrompt(sessionContext: string, memoryContext: string): string {
+  const contextBlock = sessionContext ? `[会话上下文 - 最近消息]\n${sessionContext}\n` : "";
+  const memoryBlock = memoryContext ? `[记忆 - 用户偏好]\n${memoryContext}\n` : "";
+  const extra = (contextBlock + memoryBlock).trim();
+  if (extra) return extra + "\n\n" + CLASSIFY_SYSTEM_PROMPT;
+  return CLASSIFY_SYSTEM_PROMPT;
 }
 
 function buildSafeExecuteStdin(originalText: string): string {
@@ -923,13 +1121,15 @@ async function handleMessage(
   // --- Pass 1: classify intent WITHOUT tools ---
   const classifyStdin = buildClassifyStdin(entry);
   const classifyLabel = `Classify ${entry.id}`;
+  const sessionCtx = buildSessionContext(getActiveSession(entry.fromUserId)?.id || "");
+  const memoryCtx = getMemoryContext(entry.fromUserId);
+  const sysPrompt = buildClassifySystemPrompt(sessionCtx, memoryCtx);
   logLine(config, `Classify calling claude for ${entry.id}`);
 
-  let classifyResult = await callClaude(classifyStdin, config.projectRoot, false, classifyLabel, config, "classify", CLASSIFY_SYSTEM_PROMPT);
+  let classifyResult = await callClaude(classifyStdin, config.projectRoot, false, classifyLabel, config, "classify", sysPrompt);
   let classifyRetryReason = !classifyResult.stdout.trim() && classifyResult.exitCode === 0
     ? "empty_stdout"
     : getClaudeRetryReason(classifyResult);
-
   if (classifyRetryReason) {
     const retryDelayMs = classifyRetryReason === "timeout" ? 3000 : 2000;
     const retryNote = classifyRetryReason === "timeout"
@@ -937,7 +1137,7 @@ async function handleMessage(
       : `${classifyLabel} empty stdout (exit=0), retrying after ${Math.round(retryDelayMs / 1000)}s`;
     logLine(config, retryNote);
     await Bun.sleep(retryDelayMs);
-    classifyResult = await callClaude(classifyStdin, config.projectRoot, false, `${classifyLabel} retry`, config, "classify", CLASSIFY_SYSTEM_PROMPT);
+    classifyResult = await callClaude(classifyStdin, config.projectRoot, false, `${classifyLabel} retry`, config, "classify", sysPrompt);
     classifyRetryReason = null;
   }
 
@@ -1216,6 +1416,52 @@ async function recoverStaleClassifyingMessages(
   }
 }
 
+async function updateMemoryOnSessionClose(
+  session: Session,
+  config: AutoReplyConfig,
+  wrappedSendText: (params: { to: string; text: string; contextToken: string }) => Promise<boolean>,
+): Promise<void> {
+  if (session.messageCount < 2) return;
+  const windowMsgs = messageWindows[session.id] || [];
+  const summaryInput = windowMsgs.map(m => {
+    const label = m.direction === "in" ? "用户" : "Bot";
+    return `${label}: ${m.text.slice(0, 100)}`;
+  }).join("\n").slice(0, 800);
+
+  ensureUserMemory(session.userId);
+  const currentMem = JSON.stringify(memoryMap[session.userId]);
+  const stdin = `以下为当前用户记忆（JSON）：\n${currentMem}\n\n以下为本次会话的对话摘要：\n${summaryInput}`;
+
+  let result: { stdout: string; exitCode: number; stderr: string };
+  try {
+    result = await callClaude(stdin, config.projectRoot, false, `memory ${session.id.slice(-8)}`, config, "memory", MEMORY_UPDATE_PROMPT);
+  } catch {
+    logLine(config, `Memory update LLM failed for ${session.userId}`);
+    return;
+  }
+
+  try {
+    const jsonStart = result.stdout.indexOf("{");
+    const jsonEnd = result.stdout.lastIndexOf("}") + 1;
+    if (jsonStart < 0 || jsonEnd <= jsonStart) return;
+    const parsed = JSON.parse(result.stdout.slice(jsonStart, jsonEnd));
+    const mem = memoryMap[session.userId];
+    if (parsed.interests) mem.interests = [...new Set([...mem.interests, ...parsed.interests])].slice(-20);
+    if (parsed.profile && typeof parsed.profile === "string") mem.profile = parsed.profile;
+    if (parsed.preferences) mem.preferences = [...new Set([...mem.preferences, ...parsed.preferences])].slice(-10);
+    if (parsed.notes) mem.notes = parsed.notes.slice(-10);
+    mem.stats.totalInteractions += session.messageCount;
+    mem.stats.lastSeenAt = new Date().toISOString();
+    mem.updatedAt = new Date().toISOString();
+    memoryDigestCache[session.userId] = computeMemoryHash(session.userId);
+    saveMemory(config.memoryPath);
+    saveMemoryDigest(config.memoryDigestPath);
+    logLine(config, `Memory updated for ${session.userId}`);
+  } catch {
+    logLine(config, `Memory JSON parse failed for ${session.userId}`);
+  }
+}
+
 /** Finalize a classified message: send reply, or retry, or fallback. */
 async function finalizeAction(
   config: AutoReplyConfig,
@@ -1286,6 +1532,42 @@ async function handleIncomingMessage(
   }
   processing = true;
   try {
+    // --- Session management ---
+    ensureUserMemory(entry.fromUserId);
+    let session = getActiveSession(entry.fromUserId);
+
+    if (!session) {
+      createSession(entry.fromUserId);
+      session = getActiveSession(entry.fromUserId)!;
+    } else if (isSessionExpired(session.id)) {
+      if (!(session as any)._expirePromptSent) {
+        (session as any)._expirePromptSent = true;
+        await wrappedSendText({
+          to: entry.fromUserId,
+          text: `之前的对话已中断（10分钟无互动）。回复"新"开启新话题，或直接输入继续。`,
+          contextToken: entry.contextToken || "",
+        });
+      }
+    }
+
+    if (entry.text.trim() === "/new" || entry.text.trim() === "/reset" || entry.text.trim() === "新") {
+      closeSession(session.id, "manual");
+      await updateMemoryOnSessionClose(session, config, wrappedSendText);
+      saveSessions(config.sessionPath);
+      saveSessionCursor(config.sessionCursorPath);
+      const newSid = createSession(entry.fromUserId);
+      addMessageToWindow(newSid, entry.text, "in");
+      await wrappedSendText({
+        to: entry.fromUserId,
+        text: "已开始新对话。",
+        contextToken: entry.contextToken || "",
+      });
+      advanceState(config, entry.id, "replied");
+      return;
+    }
+
+    addMessageToWindow(session.id, entry.text, "in");
+
     const currentState = loadState(config.statePath);
     const lifecycle = currentState.messageStates[entry.id];
     const deadLetter = new Set(currentState.deadLetterIds || []);
@@ -1368,6 +1650,17 @@ async function handleIncomingMessage(
     }
 
     await finalizeAction(config, entry, action, wrappedSendText, wrappedSendMediaFile);
+
+    // Record outbound reply to session window
+    const activeSess = getActiveSession(entry.fromUserId);
+    if (activeSess && action.type !== "risky") {
+      const replyText = (action as any).reply || "";
+      if (replyText) addMessageToWindow(activeSess.id, replyText, "out");
+    }
+
+    // Persist session state
+    saveSessions(config.sessionPath);
+    saveSessionCursor(config.sessionCursorPath);
   } finally {
     processing = false;
   }
@@ -1566,7 +1859,16 @@ async function main(): Promise<void> {
     pendingPath: join(claudeDir, "wechat-auto-pending.jsonl"),
     cursorPath: join(claudeDir, "wechat-auto-cursor.txt"),
     chatHistoryPath: join(claudeDir, "chat-history.jsonl"),
+    sessionPath: join(claudeDir, "wechat-sessions.jsonl"),
+    sessionCursorPath: join(claudeDir, "wechat-session-cursor.json"),
+    memoryPath: join(claudeDir, "wechat-memory.json"),
+    memoryDigestPath: join(claudeDir, "wechat-memory-digest.txt"),
   };
+
+  loadSessions(config.sessionPath);
+  loadSessionCursor(config.sessionCursorPath);
+  loadMemory(config.memoryPath);
+  loadMemoryDigest(config.memoryDigestPath);
 
   const initialState = loadState(config.statePath);
   if (!initialState.lastStartedAt) {
