@@ -55,6 +55,10 @@ This repository depends on the third-party WeChat plugin `cc-weixin v0.2.1`.
 - `.claude/hooks/wechat-tray.cs` — System tray C# source
 - `.claude/hooks/wechat-tray.exe` — Compiled tray executable
 - `.claude/hooks/wechat-tray.ico` — Tray icon
+- `.claude/hooks/wechat-approve-cli.ts` — CLI tool to list/approve/reject pending risk approvals
+- `claude-weixin-official-login.ps1` — Launch Claude Code with WeChat session for QR login
+- `claude-weixin-official.ps1` — Launch Claude Code with WeChat session and dev channel
+- `start-watcher.ps1` — Quick-start wrapper for the background watcher
 
 ## Usage
 

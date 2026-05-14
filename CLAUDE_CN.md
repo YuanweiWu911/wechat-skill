@@ -71,6 +71,9 @@ bun run wechat-gui-server.ts
 - `wechat-launcher.exe` — 预编译独立可执行文件（约 117MB，不依赖外部 Bun）
 - `wechat-gui-server.ts` — Bun 后端服务器，提供 REST API，端口 3456（开发模式/降级方案）
 - `wechat-skill-gui.html` — 单页面前端（深色/浅色主题）
+- `start-watcher.ps1` — 快速启动包装脚本，调用 `collect-wechat.ps1 --start`
+- `claude-weixin-official-login.ps1` — 使用微信会话启动 Claude Code 进行扫码登录
+- `claude-weixin-official.ps1` — 使用微信会话和开发频道启动 Claude Code
 
 **功能列表：**
 
@@ -103,6 +106,7 @@ bun build wechat-launcher.ts --compile --outfile wechat-launcher.exe
 - 消息生命周期：watcher 在 `.claude/wechat-auto-state.json` 中跟踪 `classifying` / `classified` / `executing` / `replied` / `dead`
 - 轮询游标：watcher 在 `.claude/wechat-auto-cursor.txt` 中维护项目独立 cursor
 - 风险行为：普通闲聊直接回复；安全读/搜/网页查询类任务直接执行；创建/写入/删除/脚本/安装/改配置类请求必须先确认
+- CLI 风险审批：`wechat-approve-cli.ts` 提供终端界面，可查看/批准/拒绝待审批风险项
 - 风险删除兜底：已确认的简单项目内文件删除，可以由 watcher 本地执行，避免受 Claude 工具沙箱限制影响
 - 文件传输行为：项目内白名单单文件可以直接作为附件发送；超大文件需要先确认；当前只支持按相对路径精确匹配，不支持按文件名模糊搜索
 - 消息入口：`cc-weixin v0.2.1` 通过 `getUpdates` 长轮询，并使用 MCP `notifications/claude/channel` 将消息直接推送为 `<channel source="weixin" ...>` 上下文

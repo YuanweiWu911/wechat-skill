@@ -69,6 +69,9 @@ bun run wechat-gui-server.ts
 - `wechat-launcher.exe` — Pre-compiled standalone executable (~117MB, no external Bun needed)
 - `wechat-gui-server.ts` — Bun backend serving REST API on port 3456 (dev mode / fallback)
 - `wechat-skill-gui.html` — Single-page frontend (dark/light theme)
+- `start-watcher.ps1` — Quick-start wrapper calling `collect-wechat.ps1 --start`
+- `claude-weixin-official-login.ps1` — Launch Claude Code with WeChat session for QR login
+- `claude-weixin-official.ps1` — Launch Claude Code with WeChat session and dev channel
 
 **Features:**
 - Watcher status indicator with PID display, start/stop/restart controls
@@ -99,6 +102,7 @@ Current watcher/runtime layout:
 - Message lifecycle: watcher tracks `classifying` / `classified` / `executing` / `replied` / `dead` in `.claude/wechat-auto-state.json`
 - Poll cursor: watcher persists an independent project-local cursor in `.claude/wechat-auto-cursor.txt`
 - Risk behavior: simple chat replies are sent directly; safe read/search/web tasks execute directly; create/write/delete/script/install/config-changing requests require confirmation
+- Risk CLI approval: `wechat-approve-cli.ts` provides a terminal UI to list/approve/reject pending risk items
 - Risk delete fallback: confirmed simple project-local file deletions can be executed locally by the watcher to avoid Claude tool sandbox limitations
 - File transfer behavior: project-local whitelisted single files can be sent as attachments directly; oversized files require confirmation; current matching is exact relative-path matching, not fuzzy filename search
 - Message ingress: `cc-weixin v0.2.1` uses `getUpdates` long polling and MCP `notifications/claude/channel`; messages arrive directly as `<channel source="weixin" ...>` in the chat context

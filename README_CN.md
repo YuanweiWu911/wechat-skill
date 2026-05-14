@@ -55,6 +55,10 @@
 - `.claude/hooks/wechat-tray.cs` — 系统托盘 C# 源码
 - `.claude/hooks/wechat-tray.exe` — 编译后的托盘可执行文件
 - `.claude/hooks/wechat-tray.ico` — 托盘图标
+- `.claude/hooks/wechat-approve-cli.ts` — CLI 风险审批管理工具（查看/批准/拒绝）
+- `claude-weixin-official-login.ps1` — 使用微信会话启动 Claude Code 进行扫码登录
+- `claude-weixin-official.ps1` — 使用微信会话和开发频道启动 Claude Code
+- `start-watcher.ps1` — 后台 watcher 快速启动脚本
 
 ## 使用方式
 
