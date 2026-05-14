@@ -44,6 +44,8 @@
 - **回复契约：** 一条输入消息只应产生一个主结果；风险确认执行完成后，不能再继续落入闲聊分支发送额外回复
 - **删除契约：** 简单的项目内本地文件删除可以由 watcher 本地执行，但仅限项目根目录内的安全相对路径
 - **文件传输契约：** 项目内白名单单文件发送可以由 watcher 本地执行；超过 `10MB` 的文件必须先进行二次确认
+- **媒体接收契约：** 用户发送图片/视频/语音/文件附件时，watcher 通过 CDN（AES-128-ECB 解密）自动下载，保存到 `.claude/wechat-media/`，并记录原始文件名；回复必须使用统一格式 `收到《文件名》，需要我帮忙吗？`，不做展开
+- **媒体回复契约：** 附件消息必须产生唯一的标准化回复；不得猜测文件内容，不得在确认回复后再生成额外的闲聊回复
 - **Channel 契约：** 代码不得再依赖 `cli-inbox.ts`、`inbox.jsonl`、copy/export 导入流程；消息现在通过 MCP channel push 进入上下文
 - **Cursor 契约：** watcher 进度持久化在项目内 `.claude/wechat-auto-cursor.txt`；不要再切回插件全局 cursor
 - **Start 入口契约：** `wechat-skill-2` 支持 `/wechat-skill-2 --start` 作为 skill 入口层控制模式；该参数必须在 `collect-wechat.ps1` 中先于 inbox 导入被处理，且必须与其他所有参数保持互斥；只有在观察到当前项目 watcher 已后台运行后，才能返回成功
@@ -53,34 +55,41 @@
 
 项目附带一个基于 Web 的控制中心，可零命令行可视化管理 watcher。
 
-**启动命令：**
+**一键启动（双击 `wechat-launcher.exe`）：**
+1. 启动后台 watcher
+2. 启动内置 HTTP 服务器（已内嵌 `wechat-gui-server.ts` 全部功能）
+3. 自动打开浏览器访问 `http://localhost:3456`
 
+**开发模式启动：**
 ```powershell
 bun run wechat-gui-server.ts
 ```
 
-然后在浏览器打开 **http://localhost:3456**。
-
 **核心文件：**
 
-- `wechat-gui-server.ts` — Bun 后端服务器，提供 REST API，端口 3456
-- `wechat-skill-gui.html` — 单页面暗色主题前端
+- `wechat-launcher.ts` — 一体化启动器源码（启 watcher + 内嵌 HTTP 服务器 + 开浏览器）；可编译为独立 exe
+- `wechat-launcher.exe` — 预编译独立可执行文件（约 117MB，不依赖外部 Bun）
+- `wechat-gui-server.ts` — Bun 后端服务器，提供 REST API，端口 3456（开发模式/降级方案）
+- `wechat-skill-gui.html` — 单页面前端（深色/浅色主题）
 
 **功能列表：**
 
-- **Watcher 状态指示** — 顶部状态徽章，运行/停止/启动中
+- **Watcher 状态监控** — 顶部状态徽章显示 PID，运行/停止/启动中
 - **启停控制** — 一键启动、停止、重启 watcher
-- **消息更新** — 手动触发消息轮询 + 自动 5 秒刷新
-- **会话浏览** — 左侧列表按时间倒排，点击切换
+- **会话浏览** — 左侧列表按最后消息时间倒排，点击切换
 - **对话气泡** — 类微信风格，用户消息居左、Bot 回复居右
-- **关键词搜索** — 侧栏过滤 + 模态框全局历史检索
+- **消息发送** — 底部输入框输入文本，回车发送；文件选择器用于文件传输
+- **文件接收** — 附件（图片/视频/语音/文件）通过 CDN + AES 解密自动下载，在气泡中显示原始文件名的可点击链接
+- **用户昵称** — 点击会话列表头像设置显示昵称（localStorage 持久化，不影响后台用户 ID）
+- **防闪烁轮询** — 比较数据指纹后再重建 DOM，仅在实际变化时重新渲染
+- **关键词搜索** — 模态框全局历史检索
 - **风险审核面板** — 底部弹出面板，支持批准/拒绝
 - **运行统计** — 已回复/风险待审/死信计数
+- **配色切换** — 深色/浅色主题一键切换，选择持久化
 
-**编译为独立 exe：**
-
+**编译 launcher：**
 ```powershell
-bun build wechat-gui-server.ts --compile --outfile wechat-gui-server.exe
+bun build wechat-launcher.ts --compile --outfile wechat-launcher.exe
 ```
 
 ## 安全：微信技能链（`wechat-skill-2`）
@@ -107,7 +116,7 @@ bun build wechat-gui-server.ts --compile --outfile wechat-gui-server.exe
 - **隐私 / 数据外发：** 导入的微信消息会进入 Claude 对话上下文，并发送给 Anthropic API。所有聊天内容，包括媒体附件，都会流向外部服务器
 - **自动启动：** `SessionStart` 钩子 `start-wechat-auto.ps1` 会在每次 Claude Code 会话启动时，无需确认地自动启动微信轮询
 - **Cursor 竞争风险：** 如果代码误用插件全局 cursor，而不是 `.claude/wechat-auto-cursor.txt`，MCP 主进程与 watcher 可能互相抢更新，造成漏消息
-- **明文持久化：** watcher 的状态、pending 审核信息和日志会落在本地 `.claude/` 目录；媒体文件仍会下载到共享临时目录 `%TMP%/weixin-media/`
+- **明文持久化：** watcher 的状态、pending 审核信息和日志会落在本地 `.claude/` 目录；媒体文件保存到 `.claude/wechat-media/`，保留原始扩展名
 - **PowerShell ExecutionPolicy Bypass：** 该链路中的所有 PowerShell 脚本都以 `-ExecutionPolicy Bypass` 运行。虽然这是 Claude Code 脚本常见做法，但也移除了一个基础安全网
 
 当前已具备的正向防护包括：配对码访问控制、会话过期处理、基于父进程 PID 的孤儿进程清理、单实例保护、独立 watcher cursor、风险确认状态保护、本地风险删除兜底、本地白名单文件发送与大文件确认、超时重试，以及连续错误退避。

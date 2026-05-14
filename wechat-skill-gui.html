@@ -792,14 +792,15 @@ function renameUser(uid) {
 
 function buildSessionList() {
   sessions = {};
+  const seen = new Set();
   for (const [id, lifecycle] of Object.entries(currentState.messageStates || {})) {
     const uid = lifecycle.fromUserId || 'unknown';
     if (!sessions[uid]) {
       sessions[uid] = { id: uid, name: getDisplayName(uid), messages: [], lastTime: '' };
     }
     const text = lifecycle.originalText || '';
-    if (/^\[(文件|图片|视频|语音)(:|：|\])/.test(text)) continue;
-    if (text === '(media attachment)') continue;
+    const isAttachment = /^\[(文件|图片|视频|语音)(:|：|\])/.test(text) || text === '(media attachment)';
+    if (isAttachment) continue;
     const msgTime = lifecycle.receivedAt || lifecycle.lastAttemptAt;
     sessions[uid].messages.push({
       id, status: lifecycle.status,
@@ -809,6 +810,7 @@ function buildSessionList() {
       fromUserId: lifecycle.fromUserId,
       direction: 'in',
     });
+    seen.add(uid + '|' + text + '|' + Math.round(new Date(msgTime).getTime() / 30000));
     if (msgTime > sessions[uid].lastTime || !sessions[uid].lastTime) {
       sessions[uid].lastTime = msgTime;
     }
@@ -816,6 +818,12 @@ function buildSessionList() {
 
   for (const record of currentChatHistory) {
     const uid = record.from || record.to || record.fromUserId || 'unknown';
+    const isIncoming = !record.direction || record.direction === 'in';
+    if (isIncoming) {
+      const time = record.time || '';
+      const dedupKey = uid + '|' + (record.text || '') + '|' + (time ? Math.round(new Date(time).getTime() / 30000) : 0);
+      if (seen.has(dedupKey)) continue;
+    }
     if (!sessions[uid]) {
       sessions[uid] = { id: uid, name: getDisplayName(uid), messages: [], lastTime: '' };
     }
@@ -823,9 +831,9 @@ function buildSessionList() {
       id: record.id || `hist-${Date.now()}-${Math.random().toString(16).slice(2)}`,
       text: record.text || '',
       time: record.time || '',
-      direction: record.direction === 'out' ? 'out' : 'in',
+      direction: isIncoming ? 'in' : 'out',
       fromUserId: uid,
-      isOutgoing: record.direction === 'out',
+      isOutgoing: !isIncoming,
       file: record.file,
       attachmentPath: record.attachmentPath || '',
       attachmentType: record.attachmentType || '',
