@@ -80,6 +80,10 @@ interface AutoReplyConfig {
   pendingPath: string;
   cursorPath: string;
   chatHistoryPath: string;
+  sessionPath: string;
+  sessionCursorPath: string;
+  memoryPath: string;
+  memoryDigestPath: string;
 }
 
 interface FileTransferDecision {
@@ -88,6 +92,48 @@ interface FileTransferDecision {
   fileExists: boolean;
   fileSizeBytes: number;
   requiresConfirmation: boolean;
+}
+
+interface Session {
+  id: string;
+  userId: string;
+  startedAt: string;
+  lastMessageAt: string;
+  messageCount: number;
+  summary: string;
+  status: "active" | "closed";
+  closedAt?: string;
+  closingReason?: "timeout" | "reset" | "manual";
+}
+
+interface SessionCursor {
+  [userId: string]: string;
+}
+
+interface WindowMessage {
+  text: string;
+  direction: "in" | "out";
+  time: string;
+}
+
+interface UserMemory {
+  userId: string;
+  updatedAt: string;
+  interests: string[];
+  stats: {
+    totalInteractions: number;
+    firstSeenAt: string;
+    lastSeenAt: string;
+    activeHours: number[];
+    topicsMentioned: Record<string, number>;
+  };
+  preferences: string[];
+  profile: string;
+  notes: string[];
+}
+
+interface UserMemoryMap {
+  [userId: string]: UserMemory;
 }
 
 const DEFAULT_POLL_MS = 8000;
@@ -106,6 +152,11 @@ const DIRECT_SEND_ALLOWED_EXTENSIONS = new Set([
   ".pptx",
   ".xlsx",
 ]);
+
+const SESSION_TTL_MS = 10 * 60 * 1000;
+const MAX_WINDOW_MESSAGES = 20;
+const MEMORY_L1_CHARS = 500;
+const MAX_CONTEXT_CHARS = 800;
 
 let processing = false;
 let claudeExecutableCache: string | null | undefined;
