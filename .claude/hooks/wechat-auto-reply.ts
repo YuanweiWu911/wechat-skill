@@ -332,6 +332,7 @@ function closeSession(sessionId: string, reason: Session["closingReason"]): void
   s.status = "closed";
   s.closedAt = new Date().toISOString();
   s.closingReason = reason;
+  delete messageWindows[sessionId];
 }
 
 function addMessageToWindow(sessionId: string, text: string, direction: "in" | "out"): void {
@@ -1082,7 +1083,9 @@ async function handleMessage(
     const riskyStdin = buildRiskyExecuteStdin(forceExecute.originalText, forceExecute.command);
     const label = `RiskyExec ${entry.id}`;
     logLine(config, `RiskyExec calling claude for ${entry.id}`);
-
+    doSend({ to: entry.fromUserId, text: "已收到确认，正在执行（可能需要10-20分钟），完成后会自动回复。", contextToken: entry.contextToken || "" }).catch((e: unknown) => {
+      logLine(config, `RiskyExec ack send failed: ${e instanceof Error ? e.message : String(e)}`);
+    });
     let result = await callClaude(riskyStdin, config.projectRoot, true, label, config, "risky_execute", RISKY_EXECUTE_SYSTEM_PROMPT);
     let action = parseActionJson(result.stdout);
     const retryReason = !action ? getClaudeRetryReason(result) : null;
@@ -1164,7 +1167,9 @@ async function handleMessage(
     const executeStdin = buildSafeExecuteStdin(entry.text);
     const executeLabel = `Execute ${entry.id}`;
     logLine(config, `Execute calling claude for ${entry.id}`);
-
+    doSend({ to: entry.fromUserId, text: "已收到请求，正在执行（可能需要10-20分钟），完成后会自动回复。", contextToken: entry.contextToken || "" }).catch((e: unknown) => {
+      logLine(config, `Execute ack send failed: ${e instanceof Error ? e.message : String(e)}`);
+    });
     let execResult = await callClaude(executeStdin, config.projectRoot, true, executeLabel, config, "execute", SAFE_EXECUTE_SYSTEM_PROMPT);
     const executeRetryReason = !execResult.stdout.trim() && execResult.exitCode === 0
       ? "empty_stdout"
@@ -1540,14 +1545,13 @@ async function handleIncomingMessage(
       createSession(entry.fromUserId);
       session = getActiveSession(entry.fromUserId)!;
     } else if (isSessionExpired(session.id)) {
-      if (!(session as any)._expirePromptSent) {
-        (session as any)._expirePromptSent = true;
-        await wrappedSendText({
-          to: entry.fromUserId,
-          text: `之前的对话已中断（10分钟无互动）。回复"新"开启新话题，或直接输入继续。`,
-          contextToken: entry.contextToken || "",
-        });
-      }
+      closeSession(session.id, "timeout");
+      await updateMemoryOnSessionClose(session, config, wrappedSendText);
+      saveSessions(config.sessionPath);
+      saveSessionCursor(config.sessionCursorPath);
+      createSession(entry.fromUserId);
+      session = getActiveSession(entry.fromUserId)!;
+      logLine(config, `Session auto-closed (timeout), new session ${session.id}`);
     }
 
     if (entry.text.trim() === "/new" || entry.text.trim() === "/reset" || entry.text.trim() === "新") {

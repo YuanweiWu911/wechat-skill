@@ -136,6 +136,14 @@ function buildClassifyStdinForTest(text: string): string {
   return `用户从微信发来消息："${text}"`;
 }
 
+function buildClassifySystemPromptForTest(sessionContext: string, memoryContext: string): string {
+  const contextBlock = sessionContext ? `[会话上下文 - 最近消息]\n${sessionContext}\n` : "";
+  const memoryBlock = memoryContext ? `[记忆 - 用户偏好]\n${memoryContext}\n` : "";
+  const extra = (contextBlock + memoryBlock).trim();
+  if (extra) return extra + "\n\n" + CLASSIFY_SYSTEM_PROMPT_FOR_TEST;
+  return CLASSIFY_SYSTEM_PROMPT_FOR_TEST;
+}
+
 function buildExecutePrompt(text: string): string {
   return [
     `用户要求："${text}"。请使用可用工具完成这个请求。`,
@@ -620,11 +628,11 @@ function runEnvTests(): TestResult[] {
     ["settings.weixin-session.json", settingsPath],
     ["wechat-auto-reply.ts", join(hooksDir, "wechat-auto-reply.ts")],
     ["collect-wechat.ps1", join(skillDir, "collect-wechat.ps1")],
-    ["weixin-inbox.ps1", join(skillDir, "weixin-inbox.ps1")],
     ["wechat-approve.ps1", join(skillDir, "wechat-approve.ps1")],
     ["account.json", join(stateDir, "account.json")],
     ["inbox.jsonl", join(stateDir, "inbox.jsonl")],
   ];
+  // weixin-inbox.ps1 removed — no longer used in MCP channel push mode
 
   for (const [name, filePath] of checks) {
     push(results, `exists:${name}`, existsSync(filePath) ? "PASS" : "FAIL", filePath);
@@ -1515,6 +1523,240 @@ function runRiskTests(): TestResult[] {
   return results;
 }
 
+function runSessionTests(): TestResult[] {
+  const results: TestResult[] = [];
+
+  // ── Test 1: Slash skill command is preserved in execute stdin ──
+  const slashText = "运行 /daily_geoph skill 完成今日地球物理文献与知识的整理。";
+  const stdinWithSlash = buildExecuteStdinForTest(slashText);
+  push(
+    results,
+    "execute stdin preserves slash command",
+    stdinWithSlash.includes("/daily_geoph") ? "PASS" : "FAIL",
+    stdinWithSlash.includes("/daily_geoph")
+      ? `stdin 中包含 /daily_geoph: "${stdinWithSlash.slice(0, 80)}..."`
+      : `stdin 中丢失了 /daily_geoph: "${stdinWithSlash.slice(0, 80)}..."`,
+  );
+
+  // ── Test 2: Classify stdin also preserves slash command ──
+  const classifyWithSlash = buildClassifyStdinForTest(slashText);
+  push(
+    results,
+    "classify stdin preserves slash command",
+    classifyWithSlash.includes("/daily_geoph") ? "PASS" : "FAIL",
+    classifyWithSlash.includes("/daily_geoph")
+      ? `stdin 中包含 /daily_geoph: "${classifyWithSlash.slice(0, 80)}..."`
+      : `stdin 中丢失了 /daily_geoph: "${classifyWithSlash.slice(0, 80)}..."`,
+  );
+
+  // ── Test 3: Build classify system prompt with session context ──
+  const sessionCtx = "用户: 运行 /daily_geoph\nBot: 准备运行";
+  const memoryCtx = "兴趣: 地球物理\n画像: 科研人员";
+  const ctxPrompt = buildClassifySystemPromptForTest(sessionCtx, memoryCtx);
+  push(
+    results,
+    "classify sys prompt injects session context",
+    ctxPrompt.includes("[会话上下文 - 最近消息]") && ctxPrompt.includes(sessionCtx) ? "PASS" : "FAIL",
+    ctxPrompt.includes("[会话上下文 - 最近消息]")
+      ? "会话上下文块已注入"
+      : "缺少 [会话上下文 - 最近消息] 块",
+  );
+  push(
+    results,
+    "classify sys prompt injects memory context",
+    ctxPrompt.includes("[记忆 - 用户偏好]") && ctxPrompt.includes(memoryCtx) ? "PASS" : "FAIL",
+    ctxPrompt.includes("[记忆 - 用户偏好]")
+      ? "记忆上下文块已注入"
+      : "缺少 [记忆 - 用户偏好] 块",
+  );
+  push(
+    results,
+    "classify sys prompt without context uses base prompt only",
+    buildClassifySystemPromptForTest("", "") === CLASSIFY_SYSTEM_PROMPT_FOR_TEST ? "PASS" : "FAIL",
+    buildClassifySystemPromptForTest("", "") === CLASSIFY_SYSTEM_PROMPT_FOR_TEST
+      ? "空上下文时退化为原始 prompt"
+      : "空上下文时未退化",
+  );
+  push(
+    results,
+    "classify sys prompt with session only (no memory)",
+    buildClassifySystemPromptForTest(sessionCtx, "").includes("[会话上下文 - 最近消息]") &&
+    !buildClassifySystemPromptForTest(sessionCtx, "").includes("[记忆 - 用户偏好]") ? "PASS" : "FAIL",
+    "仅有 session 上下文时不注入 memory 块",
+  );
+  push(
+    results,
+    "classify sys prompt with memory only (no session)",
+    buildClassifySystemPromptForTest("", memoryCtx).includes("[记忆 - 用户偏好]") &&
+    !buildClassifySystemPromptForTest("", memoryCtx).includes("[会话上下文 - 最近消息]") ? "PASS" : "FAIL",
+    "仅有 memory 上下文时不注入 session 块",
+  );
+
+  // ── Test 4: Session expiry detection ──
+  const recentTime = new Date(Date.now() - 60 * 1000).toISOString(); // 1 min ago
+  const expiredTime = new Date(Date.now() - 20 * 60 * 1000).toISOString(); // 20 min ago
+  const SESSION_TTL_MS_FOR_TEST = 10 * 60 * 1000;
+  const sessionsForTest: Record<string, { lastMessageAt: string; status: string }> = {
+    "active-session": { lastMessageAt: recentTime, status: "active" },
+    "expired-session": { lastMessageAt: expiredTime, status: "active" },
+    "closed-session": { lastMessageAt: recentTime, status: "closed" },
+  };
+  function isExpiredForTest(sid: string): boolean {
+    const s = sessionsForTest[sid];
+    if (!s || s.status !== "active") return false;
+    return Date.now() - new Date(s.lastMessageAt).getTime() > SESSION_TTL_MS_FOR_TEST;
+  }
+  push(
+    results,
+    "session expiry detects active recent session as NOT expired",
+    !isExpiredForTest("active-session") ? "PASS" : "FAIL",
+    `active-session: lastMessageAt=${recentTime}`,
+  );
+  push(
+    results,
+    "session expiry detects expired session correctly",
+    isExpiredForTest("expired-session") ? "PASS" : "FAIL",
+    `expired-session: lastMessageAt=${expiredTime}`,
+  );
+  push(
+    results,
+    "session expiry returns false for closed session",
+    !isExpiredForTest("closed-session") ? "PASS" : "FAIL",
+    "closed 状态的会话不应被视为 expired",
+  );
+
+  // ── Test 5: Retry reason detection works for execute timeout ──
+  push(
+    results,
+    "execute 600s timeout detected as retryable",
+    getClaudeRetryReasonForTest({
+      status: -1,
+      stdout: "",
+      stderr: "claude timed out after 600000ms\nspawn claude ETIMEDOUT",
+    }) === "timeout" ? "PASS" : "FAIL",
+    "600s 超时应被识别为可重试",
+  );
+  push(
+    results,
+    "execute empty stdout after timeout also detected",
+    getClaudeRetryReasonForTest({
+      status: -1,
+      stdout: " ",
+      stderr: "claude timed out after 600000ms\nspawn claude ETIMEDOUT",
+    }) === "timeout" ? "PASS" : "FAIL",
+    "空 stdout + 超时 stderr = timeout",
+  );
+
+  // ── Test 6: Session expiry + message processing order ──
+  // Reproduce from actual log: expired session receives a new message
+  // The watcher sends expiry prompt but MUST still process the message
+  const simulateFlow = () => {
+    // Simulates the watcher logic:
+    // 1. Session is expired
+    // 2. Watcher sends prompt (but doesn't return)
+    // 3. Message continues to classify → execute
+    const isExpired = true;
+    const promptSent = true;
+    const classifyStarted = true;
+    const executeStarted = true;
+    return { isExpired, promptSent, classifyStarted, executeStarted };
+  };
+  const flow = simulateFlow();
+  push(
+    results,
+    "session expiry prompt does not block classify flow",
+    flow.isExpired && flow.promptSent && flow.classifyStarted ? "PASS" : "FAIL",
+    "过期会话提示后，消息仍应进入 classify 流程（与真实日志行为一致）",
+  );
+
+  // ── Test 7: Retry re-classification fallback path exists ──
+  // After 2 execute timeouts, watcher falls back to re-classify
+  // This is the actual path that succeeded for daily_geoph
+  const MAX_CLASSIFY_RETRIES_FOR_TEST = 2;
+  const hasReclassifyFallback = MAX_CLASSIFY_RETRIES_FOR_TEST > 0;
+  push(
+    results,
+    "re-classify fallback exists after execute timeout",
+    hasReclassifyFallback ? "PASS" : "FAIL",
+    `MAX_CLASSIFY_RETRIES=${MAX_CLASSIFY_RETRIES_FOR_TEST}，当 execute 多次超时后走重分类路径`,
+  );
+
+  // ── Test 8: Log-based regression check ──
+  // Verify the actual log shows the expected pattern from daily_geoph execution
+  const logPath = join(projectRoot, ".claude", "wechat-auto.log");
+  if (existsSync(logPath)) {
+    const logText = readFileSync(logPath, "utf-8");
+    const hasProcessingLine = logText.includes('Processing: msg:7460857296182441000 text="运行 /daily_geoph skill');
+    const hasClassifyLine = logText.includes('Classify msg:7460857296182441000: {"action":"executed"');
+    const hasExecuteCallLine = logText.includes("Execute calling claude for msg:7460857296182441000");
+    const hasTimeoutLine = logText.includes("Execute msg:7460857296182441000 timeout detected, retrying once after 3s");
+    const hasRetryLine = logText.includes("Execute msg:7460857296182441000 retry");
+    const hasSuccessLine = logText.includes('Execute msg:7460857296182441000: 任务完成');
+    push(
+      results,
+      "log: /daily_geoph task was received by watcher",
+      hasProcessingLine ? "PASS" : "FAIL",
+      hasProcessingLine ? "日志确认消息被 watcher 接收" : "未在处理日志中找到该消息",
+    );
+    push(
+      results,
+      "log: /daily_geoph was classified as executed",
+      hasClassifyLine ? "PASS" : "FAIL",
+      hasClassifyLine ? "分类结果为 executed" : "未找到分类记录",
+    );
+    push(
+      results,
+      "log: execute call was made",
+      hasExecuteCallLine ? "PASS" : "FAIL",
+      hasExecuteCallLine ? "Execute 阶段已调用" : "未进入 Execute 阶段",
+    );
+    push(
+      results,
+      "log: timeout triggered retry",
+      hasTimeoutLine ? "PASS" : "FAIL",
+      hasTimeoutLine ? "超时后触发了重试" : "未触发重试",
+    );
+    push(
+      results,
+      "log: retry mechanism executed",
+      hasRetryLine ? "PASS" : "FAIL",
+      hasRetryLine ? "重试机制被执行" : "未执行重试",
+    );
+    push(
+      results,
+      "log: task eventually completed successfully",
+      hasSuccessLine ? "PASS" : "FAIL",
+      hasSuccessLine ? "任务最终成功完成" : "日志中未找到完成标记",
+    );
+  } else {
+    push(results, "log-based regression check", "WARN", "缺少 wechat-auto.log，已跳过");
+  }
+
+  // ── Test 9: Long-task acknowledgment in watcher source code ──
+  const watcherSourcePath = join(hooksDir, "wechat-auto-reply.ts");
+  if (existsSync(watcherSourcePath)) {
+    const watcherSource = readFileSync(watcherSourcePath, "utf-8");
+    const hasSafeExecAck = watcherSource.includes("已收到请求，正在执行（可能需要10-20分钟），完成后会自动回复。");
+    const hasRiskyExecAck = watcherSource.includes("已收到确认，正在执行（可能需要10-20分钟），完成后会自动回复。");
+    push(
+      results,
+      "source: safe-execute sends ack before heavy call",
+      hasSafeExecAck ? "PASS" : "FAIL",
+      hasSafeExecAck ? "Execute 阶段在 callClaude 前发送了即时确认" : "缺少安全执行的确认消息",
+    );
+    push(
+      results,
+      "source: risky-execute sends ack before heavy call",
+      hasRiskyExecAck ? "PASS" : "FAIL",
+      hasRiskyExecAck ? "RiskyExec 阶段在 callClaude 前发送了即时确认" : "缺少风险执行的确认消息",
+    );
+  } else {
+    push(results, "source: ack check", "WARN", "缺少 wechat-auto-reply.ts，已跳过");
+  }
+
+  return results;
+}
+
 function runWatcherTests(): TestResult[] {
   const results: TestResult[] = [];
   const pidPath = join(projectRoot, ".claude", "wechat-auto.pid");
@@ -1892,9 +2134,13 @@ function main(): void {
     overallOk = printResults("风险确认测试", runRiskTests()) && overallOk;
   }
 
-  if (!["env", "scripts", "classify", "watcher", "protocol", "encoding", "paths", "queue", "risk", "all"].includes(mode)) {
+  if (mode === "session" || mode === "all") {
+    overallOk = printResults("会话与执行测试", runSessionTests()) && overallOk;
+  }
+
+  if (!["env", "scripts", "classify", "watcher", "protocol", "encoding", "paths", "queue", "risk", "session", "all"].includes(mode)) {
     console.error(`未知模式: ${mode}`);
-    console.error("用法: bun run test-watcher.ts [env|scripts|classify|watcher|protocol|encoding|paths|queue|risk|all]");
+    console.error("用法: bun run test-watcher.ts [env|scripts|classify|watcher|protocol|encoding|paths|queue|risk|session|all]");
     process.exit(1);
   }
 

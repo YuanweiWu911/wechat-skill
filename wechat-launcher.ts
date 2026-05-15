@@ -8,7 +8,7 @@ import { join, resolve, dirname } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 
 // ── Project root = directory of this exe ─────────────────
-const PROJ = resolve(dirname(process.argv[0]));
+const PROJ = resolve(import.meta.dir || dirname(process.execPath));
 const PORT = 3456;
 
 const CLAUDE_DIR = join(PROJ, ".claude");
@@ -157,15 +157,19 @@ function startWatcher(): Promise<boolean> {
 //  HTTP SERVER (fully inline, no external bun needed)
 // ═══════════════════════════════════════════════════════
 
+let _bunPathCache: string | null = null;
+
 function findBun(): string {
+  if (_bunPathCache) return _bunPathCache;
   const result = spawnSync("where.exe", ["bun"], { encoding: "utf-8", timeout: 5000, windowsHide: true });
   for (const line of (result.stdout || "").split(/\r?\n/)) {
     const t = line.trim();
     if (t && existsSync(t)) {
-      if (t.toLowerCase().endsWith(".exe")) return t;
-      if (t.toLowerCase().endsWith(".cmd")) return t;
+      if (t.toLowerCase().endsWith(".exe")) { _bunPathCache = t; return t; }
+      if (t.toLowerCase().endsWith(".cmd")) { _bunPathCache = t; return t; }
     }
   }
+  _bunPathCache = "bun.exe";
   return "bun.exe";
 }
 
