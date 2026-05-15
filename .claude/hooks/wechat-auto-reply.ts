@@ -1126,55 +1126,60 @@ async function handleMessage(
 
   // --- Shortcut: keyword-based classification for send/transfer requests ---
   // Haiku occasionally misclassifies send-file as chat when session context
-  // contains prior "已发送" messages. This pre-check bypasses LLM classify.
-  // NOTE: JS regex \b doesn't work for Chinese chars; use simple includes().
+  // contains prior "已发送" messages. This pre-check bypasses LLM classify
+  // but does NOT skip the execute stage — the actual file send still happens.
   const SEND_TRIGGER_KEYWORDS = [
     "发给", "发送", "发过来", "发一下", "传文件",
     "发给我", "发给您", "分段发", "发过去",
   ];
   const msgText = entry.text.trim();
+  let action: ActionResult | null = null;
+
   if (SEND_TRIGGER_KEYWORDS.some(k => msgText.includes(k)) &&
       !/^\[(?:文件|图片|视频|语音)/.test(msgText)) {
     logLine(config, `Keyword shortcut for ${entry.id}: text="${msgText.slice(0, 80)}" → executed`);
-    return { type: "executed", reply: "准备读取并发送文件" };
+    action = { type: "executed", reply: "准备读取并发送文件" };
   }
 
-  // --- Pass 1: classify intent WITHOUT tools ---
-  const classifyStdin = buildClassifyStdin(entry);
-  const classifyLabel = `Classify ${entry.id}`;
-  const sessionCtx = buildSessionContext(getActiveSession(entry.fromUserId)?.id || "");
-  const memoryCtx = getMemoryContext(entry.fromUserId);
-  const sysPrompt = buildClassifySystemPrompt(sessionCtx, memoryCtx);
-  logLine(config, `Classify calling claude for ${entry.id}`);
+  // --- Pass 1: classify intent WITHOUT tools (skip if keyword shortcut already matched)
+  let classifyResult: { stdout: string; stderr: string; exitCode: number } | undefined;
+  if (!action) {
+    const classifyStdin = buildClassifyStdin(entry);
+    const classifyLabel = `Classify ${entry.id}`;
+    const sessionCtx = buildSessionContext(getActiveSession(entry.fromUserId)?.id || "");
+    const memoryCtx = getMemoryContext(entry.fromUserId);
+    const sysPrompt = buildClassifySystemPrompt(sessionCtx, memoryCtx);
+    logLine(config, `Classify calling claude for ${entry.id}`);
 
-  let classifyResult = await callClaude(classifyStdin, config.projectRoot, false, classifyLabel, config, "classify", sysPrompt);
-  let classifyRetryReason = !classifyResult.stdout.trim() && classifyResult.exitCode === 0
-    ? "empty_stdout"
-    : getClaudeRetryReason(classifyResult);
-  if (classifyRetryReason) {
-    const retryDelayMs = classifyRetryReason === "timeout" ? 3000 : 2000;
-    const retryNote = classifyRetryReason === "timeout"
-      ? `${classifyLabel} timeout detected, retrying once after ${Math.round(retryDelayMs / 1000)}s`
-      : `${classifyLabel} empty stdout (exit=0), retrying after ${Math.round(retryDelayMs / 1000)}s`;
-    logLine(config, retryNote);
-    await Bun.sleep(retryDelayMs);
-    classifyResult = await callClaude(classifyStdin, config.projectRoot, false, `${classifyLabel} retry`, config, "classify", sysPrompt);
-    classifyRetryReason = null;
+    classifyResult = await callClaude(classifyStdin, config.projectRoot, false, classifyLabel, config, "classify", sysPrompt);
+    let classifyRetryReason = !classifyResult.stdout.trim() && classifyResult.exitCode === 0
+      ? "empty_stdout"
+      : getClaudeRetryReason(classifyResult);
+    if (classifyRetryReason) {
+      const retryDelayMs = classifyRetryReason === "timeout" ? 3000 : 2000;
+      const retryNote = classifyRetryReason === "timeout"
+        ? `${classifyLabel} timeout detected, retrying once after ${Math.round(retryDelayMs / 1000)}s`
+        : `${classifyLabel} empty stdout (exit=0), retrying after ${Math.round(retryDelayMs / 1000)}s`;
+      logLine(config, retryNote);
+      await Bun.sleep(retryDelayMs);
+      classifyResult = await callClaude(classifyStdin, config.projectRoot, false, `${classifyLabel} retry`, config, "classify", sysPrompt);
+      classifyRetryReason = null;
+    }
+
+    if (classifyResult.stdout.trim() && classifyResult.exitCode === 0 &&
+        !classifyResult.stdout.trimStart().startsWith("{")) {
+      logLine(config, `${classifyLabel} non-JSON output, retrying with stricter prompt`);
+      await Bun.sleep(2000);
+      const strictStdin = buildClassifyStdin(entry) + "\n\n你上一次输出了非JSON文本，严重违规。你必须只输出一行纯JSON。";
+      const strictSysPrompt = sysPrompt + "\n\n强制要求：只输出一行纯JSON。以 { 开头，以 } 结尾。";
+      classifyResult = await callClaude(strictStdin, config.projectRoot, false, `${classifyLabel} strict retry`, config, "classify", strictSysPrompt);
+    }
+
+    action = parseActionJson(classifyResult.stdout);
   }
-
-  if (classifyResult.stdout.trim() && classifyResult.exitCode === 0 &&
-      !classifyResult.stdout.trimStart().startsWith("{")) {
-    logLine(config, `${classifyLabel} non-JSON output, retrying with stricter prompt`);
-    await Bun.sleep(2000);
-    const strictStdin = buildClassifyStdin(entry) + "\n\n你上一次输出了非JSON文本，严重违规。你必须只输出一行纯JSON。";
-    const strictSysPrompt = sysPrompt + "\n\n强制要求：只输出一行纯JSON。以 { 开头，以 } 结尾。";
-    classifyResult = await callClaude(strictStdin, config.projectRoot, false, `${classifyLabel} strict retry`, config, "classify", strictSysPrompt);
-  }
-
-  const action = parseActionJson(classifyResult.stdout);
 
   if (!action) {
-    if (classifyResult.exitCode !== 0 && classifyResult.stderr) {
+    if (typeof classifyResult !== "undefined" && classifyResult.exitCode !== 0 && classifyResult.stderr) {
       const brief = classifyResult.stderr.split("\n").filter(l => l.trim()).slice(0, 2).join(" | ");
       return { type: "failed", reason: `LLM调用失败(exit=${classifyResult.exitCode}): ${brief.slice(0, 100)}` };
     }
