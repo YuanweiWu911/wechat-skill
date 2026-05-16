@@ -597,6 +597,10 @@ function sanitizeReply(text: string): string {
   return text.replace(/\r/g, "").trim().replace(/\n{3,}/g, "\n\n").trim();
 }
 
+function escapeWechatMarkdown(text: string): string {
+  return text.replace(/_/g, "\uFF3F");
+}
+
 function shouldSkip(entry: InboxEntry): boolean {
   const text = entry.text.trim();
   return text.length === 0;
@@ -1284,7 +1288,7 @@ async function safeSendText(
     try {
       await sendText({
         to: params.to,
-        text: params.text,
+        text: escapeWechatMarkdown(params.text),
         baseUrl: account.baseUrl || "https://ilinkai.weixin.qq.com",
         token: account.token,
         contextToken: params.contextToken,
@@ -1316,7 +1320,7 @@ async function safeSendMediaFile(
       await sendMediaFile({
         filePath: params.filePath,
         to: params.to,
-        text: params.text,
+        text: escapeWechatMarkdown(params.text),
         baseUrl: account.baseUrl || "https://ilinkai.weixin.qq.com",
         token: account.token,
         contextToken: params.contextToken,

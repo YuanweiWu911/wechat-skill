@@ -67,6 +67,10 @@ function findPluginRoot(): string {
   return candidates[0];
 }
 
+function escapeWechatMarkdown(text: string): string {
+  return text.replace(/_/g, "\uFF3F");
+}
+
 async function main() {
   const { to, text, file, contextToken } = parseArgs();
   const account = loadAccount();
@@ -93,7 +97,7 @@ async function main() {
       const result = await weixin.sendMediaFile({
         filePath: resolve(file),
         to,
-        text: text || "",
+        text: escapeWechatMarkdown(text || ""),
         baseUrl,
         token: account.token,
         contextToken: ctoken,
@@ -104,7 +108,7 @@ async function main() {
       // Send text
       const result = await weixin.sendText({
         to,
-        text,
+        text: escapeWechatMarkdown(text),
         baseUrl,
         token: account.token,
         contextToken: ctoken,

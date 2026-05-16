@@ -955,6 +955,25 @@ function runPathTests(): TestResult[] {
     );
   }
 
+  // ── Test 13: Underscore escaping for WeChat Markdown ──
+  const wsPath = join(projectRoot, "wechat-send.ts");
+  if (existsSync(wsPath)) {
+    const wsSrc = readFileSync(wsPath, "utf-8");
+    const hasEscapeFunc = wsSrc.includes("escapeWechatMarkdown");
+    const hasApplySendText = wsSrc.includes("escapeWechatMarkdown(text)");
+    const hasApplySendFile = wsSrc.includes("escapeWechatMarkdown(text ||");
+    push(
+      results,
+      "source: wechat-send.ts escapes underscores for WeChat markdown",
+      hasEscapeFunc && hasApplySendText ? "PASS" : "FAIL",
+      hasEscapeFunc && hasApplySendText
+        ? "sendText 和 sendMediaFile 都应用了下划线转义"
+        : "下划线未转义，_ 会在 WeChat 客户端被 Markdown 吞噬",
+    );
+  } else {
+    push(results, "source: underscore escape check", "WARN", "缺少 wechat-send.ts");
+  }
+
   return results;
 }
 
